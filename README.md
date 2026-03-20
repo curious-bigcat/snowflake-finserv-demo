@@ -1,580 +1,320 @@
-# HOL Snowpark Demo -- E-Commerce Analytics Pipeline
+# Snowflake Financial Services Demo (FINSERV)
 
-End-to-end demo showcasing Snowflake's data engineering capabilities: raw ingestion, CDC streams, dynamic tables, materialized views, task DAGs, Snowpark Python, and a Streamlit dashboard.
+Full-stack Snowflake demo project implementing a **medallion architecture** data pipeline for a fictional financial services company. Covers 20+ Snowflake features across data engineering, AI/ML, and application development.
 
 ---
 
 ## Architecture
 
 ```
-                              HOL_DB Database
- +-----------------+   +--------------------+   +---------------------------+
- |   RAW Schema    |   |  CURATED Schema    |   |   CONSUMPTION Schema      |
- |                 |   |                    |   |                           |
- |  CUSTOMERS      |   |  MV_CUSTOMER_      |   |  DT_DAILY_SALES          |
- |  PRODUCTS       |   |    DIRECTORY       |   |    (Dynamic Table)       |
- |  ORDERS         |   |    (Mat. View)     |   |                           |
- |    (VARIANT)    |   |                    |   |  MV_PRODUCT_CATALOG      |
- |  WEBSITE_EVENTS |   |  DT_CUSTOMER_      |   |    (Materialized View)   |
- |    (VARIANT)    |   |    SUMMARY         |   |                           |
- |                 |   |    (Dynamic Table)  |   |  DT_PRODUCT_PERFORMANCE  |
- |  -- Streams --  |   |                    |   |    (Dynamic Table)       |
- |  CUSTOMERS_     |   |  DT_ORDER_ENRICHED |   |                           |
- |    STREAM       |   |    (Dynamic Table)  |   |  DT_CUSTOMER_360         |
- |  ORDERS_STREAM  |   |                    |   |    (Dynamic Table)       |
- |  EVENTS_STREAM  |   |  DT_EVENT_PARSED   |   |                           |
- |                 |   |    (Dynamic Table)  |   |  DT_CATEGORY_TRENDS      |
- |  -- Tasks --    |   |                    |   |    (Dynamic Table)       |
- |  (see DAG below)|   |  ORDERS_FROM_      |   |                           |
- |                 |   |    STREAM           |   |  PIPELINE_METRICS        |
- |                 |   |  EVENTS_FROM_       |   |    (Task-fed)            |
- |                 |   |    STREAM           |   |                           |
- +-----------------+   +--------------------+   +---------------------------+
-
-Data Flow:  RAW (landing) --> CURATED (enriched/joined) --> CONSUMPTION (business-ready)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           FINSERV_DB                                        │
+│                                                                             │
+│  ┌──────────┐    ┌──────────┐    ┌──────────────┐    ┌────────────────┐    │
+│  │   BASE   │───▶│   RAW    │───▶│   CURATED    │───▶│  CONSUMPTION   │    │
+│  │          │    │          │    │              │    │                │    │
+│  │ 7 tables │    │ 7 streams│    │ 4 dynamic    │    │ 6 dynamic      │    │
+│  │ GENERATOR│    │ 3 staging│    │   tables     │    │   tables       │    │
+│  │ data     │    │ Snowpipe │    │ 1 mat. view  │    │ 2 SPs, 2 UDFs │    │
+│  │          │    │ S3 land. │    │              │    │ 1 UDTF         │    │
+│  └──────────┘    └──────────┘    └──────────────┘    └────────────────┘    │
+│       │                │                                      │            │
+│       │           Task DAG                              MCP Server         │
+│       │          (4 tasks)                          Cortex Search (2)      │
+│       ▼                                             Streamlit Dashboard    │
+│  CSV Generator                                      ML Notebooks (2)      │
+│  S3 Upload                                          Semantic Model        │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Task DAG (all tasks in RAW schema)
-
-```
-  TASK_ROOT_SCHEDULER (every 5 min)
-    +-- TASK_PROCESS_ORDERS  (when ORDERS_STREAM has data)
-    +-- TASK_PROCESS_EVENTS  (when EVENTS_STREAM has data)
-    +---- TASK_REFRESH_METRICS (after both above complete)
-```
-
-### Key Snowflake constraints demonstrated
-
-- **Materialized Views** are single-table only (no joins). Multi-table aggregations use Dynamic Tables.
-- **Task AFTER predecessors** must be in the same schema -- all tasks are in RAW.
-- **PARSE_JSON()** cannot be used inside a VALUES clause -- use `SELECT ... UNION ALL` instead.
-- **Dynamic Tables** use `TARGET_LAG` for declarative refresh (1 min, 5 min, or DOWNSTREAM).
 
 ---
 
 ## Prerequisites
 
-- Snowflake account with `ACCOUNTADMIN` role (or a role with CREATE DATABASE, CREATE WAREHOUSE privileges)
-- Snowsight access for running SQL worksheets and uploading notebooks
-- For the Streamlit dashboard: Python 3.8+ with `streamlit` and `snowflake-connector-python` installed locally, OR deploy as a Streamlit-in-Snowflake app
+| Requirement | Details |
+|---|---|
+| **Snowflake Account** | Enterprise edition or higher (for Dynamic Tables, Cortex AI) |
+| **Role** | ACCOUNTADMIN (or equivalent with CREATE WAREHOUSE, DATABASE privileges) |
+| **Python** | 3.11+ (for local notebooks, CSV generator, Streamlit) |
+| **Packages** | `snowflake-connector-python`, `snowflake-snowpark-python`, `streamlit`, `pandas`, `altair` |
+| **Optional** | AWS S3 bucket (for Snowpipe ingestion — demo works without it) |
 
 ---
 
-## Files & Execution Order
+## Quick Start
 
-### Core Pipeline (run in order, 01 through 06)
+```bash
+# 1. Clone the repo
+git clone <repo-url> && cd snowpark
 
-| # | File | Run In | What it Does |
-|---|------|--------|--------------|
-| 01 | `01_setup_database.sql` | SQL Worksheet | Creates `HOL_WH` (X-Small warehouse), `HOL_DB` database, and three schemas: `RAW`, `CURATED`, `CONSUMPTION` |
-| 02 | `02_raw_data_load.sql` | SQL Worksheet | Creates 4 raw tables with inline sample data (12 customers, 12 products, 15 orders with VARIANT JSON, 31 website events with VARIANT JSON) |
-| 03 | `03_streams.sql` | SQL Worksheet | Creates 3 CDC streams on customers, orders, and events tables for change tracking |
-| 04 | `04_curated_layer.sql` | SQL Worksheet | Creates 1 materialized view, 3 dynamic tables (1-min lag), and 2 stream-target tables in the CURATED schema |
-| 05 | `05_consumption_layer.sql` | SQL Worksheet | Creates 1 materialized view and 4 dynamic tables in the CONSUMPTION schema including the complex `DT_CUSTOMER_360` |
-| 06 | `06_tasks_and_dag.sql` | SQL Worksheet | Creates a 4-task DAG (5-minute schedule) for stream processing and metrics refresh |
+# 2. Deploy core pipeline (files 01-08) in order
+#    Execute each .sql file in Snowsight or via SnowSQL
 
-### Interactive Demos (run in any order after 01-06)
+# 3. Run advanced SQL patterns
+#    Execute 09_snowpark_sql_sheet.sql
 
-| # | File | Run In | What it Does |
-|---|------|--------|--------------|
-| 07 | `07_snowpark_sql_sheet.sql` | SQL Worksheet | 10 advanced SQL patterns: LATERAL FLATTEN, window functions, PIVOT, UNPIVOT, funnel analysis |
-| 08 | `08_snowpark_python_notebook.ipynb` | Snowflake Notebook | 17-cell notebook covering Snowpark DataFrames, VARIANT processing, window functions, Matplotlib |
-| 09 | `09_snowpark_python_sheet.sql` | SQL Worksheet | Creates 3 stored procedures, 1 UDTF, and 1 UDF using Python in Snowflake |
-| 10 | `10_monitoring_and_demo.sql` | SQL Worksheet | Pipeline validation, dynamic table refresh history, task execution history, data quality checks |
+# 4. Deploy Snowpark Python objects
+#    Execute 10_snowpark_python_sheet.sql
 
-### Dashboard & Testing
+# 5. Deploy Cortex AI services
+#    Execute 13_cortex_search_agent.sql and 14_managed_mcp_server.sql
 
-| # | File | Run In | What it Does |
-|---|------|--------|--------------|
-| 11 | `11_streamlit_dashboard.py` | Streamlit (local or SiS) | 5-tab analytics dashboard with KPIs, charts, customer segmentation, and pipeline health |
-| 12 | `12_incremental_test_data.sql` | SQL Worksheet | Inserts incremental data to test the end-to-end pipeline and verify dashboard updates |
+# 6. Run the Streamlit dashboard
+streamlit run 15_streamlit_dashboard.py
 
----
+# 7. Validate the pipeline
+#    Execute 18_monitoring_and_validation.sql
 
-## Detailed SQL Notebook Guide
+# 8. Test incremental data flow
+#    Execute 19_incremental_test_data.sql
 
-### 01_setup_database.sql -- Foundation Infrastructure
-
-**Creates:** `HOL_WH` (X-Small warehouse with auto-suspend/resume), `HOL_DB` database, three schemas (`RAW`, `CURATED`, `CONSUMPTION`).
-
-**Snowflake features demonstrated:**
-- `CREATE WAREHOUSE` with `AUTO_SUSPEND`, `AUTO_RESUME`, `INITIALLY_SUSPENDED`
-- `CREATE DATABASE` and `CREATE SCHEMA` with comments
-
-**What to observe:** After running, verify the database and schemas appear in the Snowsight object browser. The warehouse starts suspended and will auto-resume on first query.
-
----
-
-### 02_raw_data_load.sql -- Raw Tables & Sample Data
-
-**Creates 4 tables with realistic e-commerce data:**
-
-| Table | Rows | Type | Key Columns |
-|-------|------|------|-------------|
-| `RAW.CUSTOMERS` | 12 | Structured | AUTOINCREMENT PK, name, email, city, country (Asia-Pacific focus) |
-| `RAW.PRODUCTS` | 12 | Structured | 4 categories: Electronics, Furniture, Accessories, Office |
-| `RAW.ORDERS` | 15 | Semi-structured | `ORDER_DETAILS` VARIANT with nested JSON: line_items[], shipping{}, payment{} |
-| `RAW.WEBSITE_EVENTS` | 31 | Semi-structured | `EVENT_DATA` VARIANT with page views, cart actions, checkout, search events |
-
-**Snowflake features demonstrated:**
-- `VARIANT` data type for semi-structured JSON
-- `PARSE_JSON()` with the `SELECT ... UNION ALL` pattern (not VALUES)
-- `AUTOINCREMENT` primary keys
-- `TIMESTAMP_NTZ` for timezone-naive timestamps
-
-**Key pattern -- PARSE_JSON in INSERT:**
-```sql
--- WRONG: PARSE_JSON cannot be used in VALUES clause
-INSERT INTO ORDERS (...) VALUES (1, ..., PARSE_JSON('{...}'));  -- ERROR!
-
--- CORRECT: Use SELECT ... UNION ALL
-INSERT INTO ORDERS (...)
-SELECT 1, ..., PARSE_JSON('{...}')
-UNION ALL
-SELECT 2, ..., PARSE_JSON('{...}');
+# 9. Explore performance concepts
+#    Execute 20_performance_exploration.sql
 ```
 
-**What to observe:** Query `RAW.ORDERS` and expand the `ORDER_DETAILS` variant column to see nested JSON structure with line items, shipping details, and payment info.
+---
+
+## File-by-File Execution Guide
+
+### Phase 1: Foundation (Files 01-02)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 01 | `01_setup_database.sql` | Creates warehouse, database, and 4 medallion schemas | `FINSERV_WH` (X-SMALL), `FINSERV_DB`, schemas: `BASE`, `RAW`, `CURATED`, `CONSUMPTION` |
+| 02 | `02_base_tables_and_data.sql` | Creates 7 base tables and populates them with `GENERATOR()` synthetic data | `CUSTOMERS` (2K rows), `ACCOUNTS` (3K), `TRANSACTIONS` (10K), `RISK_ASSESSMENTS` (2K, VARIANT), `MARKET_DATA` (5K, VARIANT), `SUPPORT_TICKETS` (1K, TEXT), `COMPLIANCE_DOCUMENTS` (200, TEXT+VARIANT) |
+
+### Phase 2: Ingestion (Files 03-04)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 03 | `03_csv_generator_and_s3_upload.py` | **Local Python** — generates CSV files and optionally uploads to S3 | CSV files (local), S3 objects (optional) |
+| 04 | `04_s3_stage_and_snowpipe.sql` | Creates file format, S3 landing tables, external stage, and Snowpipe (S3 parts require real bucket) | `CSV_FORMAT`, 3 landing tables (`CUSTOMERS_S3`, `TRANSACTIONS_S3`, `RISK_ASSESSMENTS_S3`), stage, pipes |
+
+### Phase 3: Medallion Pipeline (Files 05-08)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 05 | `05_raw_layer.sql` | Creates 7 CDC streams on base tables + 3 staging tables | 7 streams (e.g., `CUSTOMERS_STREAM`), `CUSTOMERS_RAW`, `TRANSACTIONS_RAW`, `SUPPORT_TICKETS_RAW` |
+| 06 | `06_curated_layer.sql` | Builds curated dynamic tables and a materialized view | `DT_CUSTOMER_PROFILE`, `DT_TRANSACTION_ENRICHED`, `DT_SUPPORT_ENRICHED`, `MV_MARKET_LATEST`, `DT_RISK_FACTORS_PARSED` |
+| 07 | `07_consumption_layer.sql` | Builds consumption-layer analytics tables | `DT_CUSTOMER_360`, `DT_DAILY_FINANCIAL_METRICS`, `DT_RISK_DASHBOARD`, `DT_CHANNEL_PERFORMANCE`, `DT_CHURN_FEATURES`, `DT_MONTHLY_REVENUE` |
+| 08 | `08_tasks_and_dag.sql` | Creates a 4-task DAG for stream processing | `TASK_ROOT_SCHEDULER` → `TASK_PROCESS_TRANSACTIONS` + `TASK_PROCESS_TICKETS` → `TASK_REFRESH_METRICS` |
+
+### Phase 4: Advanced SQL & Snowpark (Files 09-11)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 09 | `09_snowpark_sql_sheet.sql` | 10 advanced SQL patterns: window functions, LATERAL FLATTEN, PIVOT/UNPIVOT, CTEs, ROLLUP, percentiles, fraud detection | Read-only queries — no persistent objects |
+| 10 | `10_snowpark_python_sheet.sql` | 6 Python-in-SQL objects: 2 stored procedures, 2 UDFs, 1 UDTF | `SP_RFM_SEGMENTATION`, `SP_PROCESS_TRANSACTIONS`, `ANOMALY_SCORE` UDF, `RISK_TIER` UDF, `PARSE_RISK_FACTORS` UDTF, `SP_PIPELINE_SUMMARY` |
+| 11 | `11_snowpark_python_notebook.ipynb` | **Local Jupyter notebook** — Snowpark DataFrame API exploration | No Snowflake objects (runs locally) |
+
+### Phase 5: Cortex AI & MCP (Files 12-14)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 12 | `12_cortex_analyst_semantic_model.yaml` | Semantic model YAML for Cortex Analyst (upload to stage) | Stage file at `@CONSUMPTION.CORTEX_STAGE/` |
+| 13 | `13_cortex_search_agent.sql` | Creates Cortex Search services on support tickets and compliance docs | `SEARCH_SUPPORT_TICKETS`, `SEARCH_COMPLIANCE_DOCS`, `CORTEX_STAGE` |
+| 14 | `14_managed_mcp_server.sql` | Creates a **Snowflake-managed MCP server** exposing Search, SQL, and custom UDF/SP tools | `FINSERV_MCP_SERVER` with 6 tools |
+
+> **Note:** `14_mcp_server.py` is the legacy custom Python MCP server. Use `14_managed_mcp_server.sql` instead — it requires no external infrastructure.
+
+### Phase 6: Applications & ML (Files 15-17)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 15 | `15_streamlit_dashboard.py` | **Local Streamlit app** — multi-tab KPI dashboard (Executive, Customers, Transactions, Risk, Channel) | Runs locally with `streamlit run` |
+| 16 | `16_ml_churn_classification.ipynb` | **Local notebook** — customer churn prediction (XGBoost/Random Forest) using `DT_CHURN_FEATURES` | Trained model (local) |
+| 17 | `17_ml_revenue_regression.ipynb` | **Local notebook** — revenue forecasting regression using `DT_MONTHLY_REVENUE` | Trained model (local) |
+
+### Phase 7: Validation & Testing (Files 18-19)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 18 | `18_monitoring_and_validation.sql` | Pipeline health checks: row counts, stream status, DT refresh history, task DAG, data quality spot checks | Read-only validation queries |
+| 19 | `19_incremental_test_data.sql` | Two-batch incremental test: inserts 5 new customers, 4 accounts, 8 transactions, 2 tickets; triggers task DAG; verifies propagation | New rows in base tables, verifies DT refresh |
+
+### Phase 8: Performance (File 20)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 20 | `20_performance_exploration.sql` | 10 performance concepts: EXPLAIN plans, warehouse sizing, clustering, search optimization, caching, spill analysis, query acceleration, resource monitors | `TRANSACTIONS_CLUSTERED`, `FINSERV_WH_SMALL`, `FINSERV_MONITOR`, `PERFORMANCE_SUMMARY` |
 
 ---
 
-### 03_streams.sql -- Change Data Capture (CDC)
+## Snowflake Features Learning Path
 
-**Creates 3 streams for tracking changes:**
+A sequential curriculum for learning Snowflake features using this project. Follow the order below — each topic builds on the previous.
 
-| Stream | Type | SHOW_INITIAL_ROWS | Tracks |
-|--------|------|-------------------|--------|
-| `RAW.CUSTOMERS_STREAM` | Standard (insert/update/delete) | TRUE | New signups and profile updates |
-| `RAW.ORDERS_STREAM` | Standard (insert/update/delete) | TRUE | New and updated orders |
-| `RAW.EVENTS_STREAM` | APPEND_ONLY | TRUE | New website events only (events are immutable) |
+### Level 1: Core Platform
 
-**Snowflake features demonstrated:**
-- `CREATE STREAM` with `APPEND_ONLY` and `SHOW_INITIAL_ROWS` options
-- `SYSTEM$STREAM_HAS_DATA()` function for conditional task execution
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 1 | **Warehouses** | Virtual Warehouses | 01 | Sizing (X-SMALL→4XL), AUTO_SUSPEND, AUTO_RESUME, INITIALLY_SUSPENDED |
+| 2 | **Databases & Schemas** | Logical Organization | 01 | Namespacing, medallion architecture (BASE→RAW→CURATED→CONSUMPTION) |
+| 3 | **Table DDL** | CREATE TABLE | 02 | Data types: NUMBER, VARCHAR, TIMESTAMP_NTZ, BOOLEAN, VARIANT, TEXT |
+| 4 | **Synthetic Data** | GENERATOR() | 02 | UNIFORM(), RANDOM(), SEQ4(), ARRAY_CONSTRUCT(), OBJECT_CONSTRUCT() |
+| 5 | **Semi-Structured Data** | VARIANT | 02 | JSON in columns, dot notation, bracket notation, type casting |
 
-**What to observe:** After creation, all streams will have `HAS_DATA = TRUE` because of `SHOW_INITIAL_ROWS = TRUE`. The streams will reset after they are consumed by a DML operation or task.
+### Level 2: Data Loading
 
----
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 6 | **File Formats** | CREATE FILE FORMAT | 04 | CSV parsing: FIELD_DELIMITER, SKIP_HEADER, NULL_IF, TRIM_SPACE |
+| 7 | **Stages** | External Stages (S3) | 04 | STORAGE_INTEGRATION, URL, encryption, DIRECTORY |
+| 8 | **COPY INTO** | Bulk Loading | 04 | FROM stage, FILE_FORMAT, ON_ERROR, MATCH_BY_COLUMN_NAME |
+| 9 | **Snowpipe** | Continuous Loading | 04 | AUTO_INGEST, SQS notifications, SYSTEM$PIPE_STATUS() |
 
-### 04_curated_layer.sql -- Curated Transformations
+### Level 3: Change Data Capture
 
-**Creates 6 objects that transform RAW data into enriched/joined views:**
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 10 | **Streams** | CDC Tracking | 05 | SHOW_INITIAL_ROWS, METADATA$ACTION, METADATA$ISUPDATE, SYSTEM$STREAM_HAS_DATA() |
+| 11 | **Stream Types** | Standard vs Append-only | 05 | Standard (full CDC), Append-only (inserts only) |
 
-| Object | Type | Refresh | What it does |
-|--------|------|---------|-------------|
-| `CURATED.MV_CUSTOMER_DIRECTORY` | Materialized View | Automatic | Single-table customer lookup (no joins -- MV constraint) |
-| `CURATED.DT_CUSTOMER_SUMMARY` | Dynamic Table | 1 minute | Joins CUSTOMERS + ORDERS for per-customer aggregates (total spend, order count, tenure) |
-| `CURATED.DT_ORDER_ENRICHED` | Dynamic Table | 1 minute | Flattens `ORDER_DETAILS` JSON into individual line items using LATERAL FLATTEN |
-| `CURATED.DT_EVENT_PARSED` | Dynamic Table | 1 minute | Extracts structured fields from `EVENT_DATA` JSON (page, device, cart info) |
-| `CURATED.ORDERS_FROM_STREAM` | Regular Table | Via Task | Populated by `TASK_PROCESS_ORDERS` from the orders stream |
-| `CURATED.EVENTS_FROM_STREAM` | Regular Table | Via Task | Populated by `TASK_PROCESS_EVENTS` from the events stream |
+### Level 4: Transformations
 
-**Snowflake features demonstrated:**
-- `CREATE MATERIALIZED VIEW` (single-table only)
-- `CREATE DYNAMIC TABLE` with `TARGET_LAG` (all 3 curated DTs use 1 minute)
-- `LATERAL FLATTEN` for exploding JSON arrays
-- Variant field access (`col:path::TYPE`)
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 12 | **Dynamic Tables** | Declarative Pipelines | 06-07 | TARGET_LAG (1 min, 5 min, DOWNSTREAM), REFRESH_MODE (FULL vs INCREMENTAL), INITIALIZE |
+| 13 | **Materialized Views** | Auto-Maintained Views | 06 | MV on VARIANT data, automatic refresh, query rewrite |
+| 14 | **LATERAL FLATTEN** | JSON Array Expansion | 06, 09 | FLATTEN(INPUT =>, OUTER => TRUE), VALUE, INDEX |
+| 15 | **QUALIFY** | Window Filter | 06 | ROW_NUMBER() OVER (...) with QUALIFY for deduplication |
 
-**Key constraint -- MV single-table only:**
-```sql
--- WRONG: MVs cannot contain joins
-CREATE MATERIALIZED VIEW MV_SUMMARY AS
-SELECT c.*, COUNT(o.ORDER_ID) FROM CUSTOMERS c JOIN ORDERS o ...;  -- ERROR!
+### Level 5: Orchestration
 
--- CORRECT: Use Dynamic Table for joins
-CREATE DYNAMIC TABLE DT_SUMMARY TARGET_LAG = '1 MINUTE' ... AS
-SELECT c.*, COUNT(o.ORDER_ID) FROM CUSTOMERS c JOIN ORDERS o ...;
-```
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 16 | **Tasks** | Scheduled Execution | 08 | SCHEDULE (CRON/interval), WAREHOUSE, AFTER (predecessors) |
+| 17 | **Task DAGs** | Dependency Graphs | 08 | Root→children→grandchild, WHEN conditions, EXECUTE TASK |
+| 18 | **Stream + Task** | Event-Driven Processing | 08 | `WHEN SYSTEM$STREAM_HAS_DATA()`, MERGE INTO with stream |
 
-**What to observe:** Query `DT_ORDER_ENRICHED` to see how nested JSON arrays become individual rows via LATERAL FLATTEN. Each order with 2-3 line items produces 2-3 rows with extracted product_id, quantity, unit_price, and discount.
+### Level 6: Advanced SQL
 
----
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 19 | **Window Functions** | Analytics | 09 | SUM/COUNT/ROW_NUMBER OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN) |
+| 20 | **PIVOT / UNPIVOT** | Reshaping Data | 09 | PIVOT (AGG FOR col IN (...)), UNPIVOT (VALUE FOR METRIC IN (...)) |
+| 21 | **GROUP BY ROLLUP** | Subtotals | 09 | ROLLUP(), CUBE(), GROUPING SETS |
+| 22 | **PERCENTILE_CONT** | Statistical Functions | 09 | WITHIN GROUP (ORDER BY ...), MEDIAN(), STDDEV() |
 
-### 05_consumption_layer.sql -- Consumption Analytics
+### Level 7: Snowpark Python
 
-**Creates 5 business-ready objects:**
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 23 | **Stored Procedures** | Python SPs | 10 | LANGUAGE PYTHON, PACKAGES, HANDLER, session.table(), write.save_as_table() |
+| 24 | **Scalar UDFs** | Python UDFs | 10 | RETURNS FLOAT/VARCHAR, single-row transform, pure Python |
+| 25 | **Table UDFs (UDTFs)** | Python UDTFs | 10 | RETURNS TABLE(...), class with process() method, yield rows |
+| 26 | **DataFrame API** | Snowpark DataFrames | 11 | col(), filter(), group_by(), agg(), join(), with_column() |
 
-| Object | Type | Refresh | What it does |
-|--------|------|---------|-------------|
-| `CONSUMPTION.DT_DAILY_SALES` | Dynamic Table | DOWNSTREAM | Daily aggregates: revenue, orders, items sold, payment method splits |
-| `CONSUMPTION.MV_PRODUCT_CATALOG` | Materialized View | Automatic | Fast product lookup (single-table from PRODUCTS) |
-| `CONSUMPTION.DT_PRODUCT_PERFORMANCE` | Dynamic Table | DOWNSTREAM | Revenue, units, buyers per product (joins PRODUCTS + DT_ORDER_ENRICHED) |
-| `CONSUMPTION.DT_CUSTOMER_360` | Dynamic Table | 5 minutes | Complete customer profile: order history + website behavior + segmentation |
-| `CONSUMPTION.DT_CATEGORY_TRENDS` | Dynamic Table | DOWNSTREAM | Monthly category/sub-category revenue, units, and customer breakdowns |
+### Level 8: Cortex AI
 
-**`DT_CUSTOMER_360` segmentation logic:**
-- **HIGH_VALUE**: lifetime value >= $500 AND total orders >= 2
-- **MEDIUM_VALUE**: lifetime value >= $200
-- **LOW_VALUE**: at least 1 order but below thresholds
-- **PROSPECT**: no orders yet (signed up but hasn't purchased)
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 27 | **Semantic Models** | Cortex Analyst | 12 | YAML schema: tables, dimensions, measures, time_dimensions, filters |
+| 28 | **Cortex Search** | Vector Search | 13 | ON column, ATTRIBUTES, TARGET_LAG, embedding model |
+| 29 | **Cortex Agent** | Multi-Tool Agent | 13 | Tool routing: analyst_text_to_sql, cortex_search |
 
-**Snowflake features demonstrated:**
-- Dynamic table chains (DOWNSTREAM lag cascades from curated layer)
-- `IFF()`, `COALESCE()`, `DATEDIFF()`, `COUNT_IF()`
-- `LISTAGG()` for aggregating status values
-- CTE-based approach for complex multi-source joins
+### Level 9: Integration & Apps
 
-**What to observe:** Query `DT_CUSTOMER_360` to see a complete customer profile combining order history, website behavior (page views, cart actions, checkouts), and auto-calculated segmentation.
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 30 | **MCP Server** | Managed MCP | 14 | CREATE MCP SERVER, tool types: CORTEX_SEARCH, SYSTEM_EXECUTE_SQL, GENERIC |
+| 31 | **Streamlit** | Data Apps | 15 | st.connection("snowflake"), tabs, Altair charts, metrics |
+| 32 | **ML Pipelines** | Model Training | 16-17 | Feature engineering from DTs, classification, regression |
 
----
+### Level 10: Operations & Performance
 
-### 06_tasks_and_dag.sql -- Task DAG Automation
-
-**Creates a 4-task DAG (all in RAW schema):**
-
-| Task | Trigger | What it does |
-|------|---------|-------------|
-| `TASK_ROOT_SCHEDULER` | CRON every 5 minutes | Root task -- fires child tasks on schedule |
-| `TASK_PROCESS_ORDERS` | AFTER root, WHEN orders stream has data | MERGE INTO curated orders table from stream (upsert) |
-| `TASK_PROCESS_EVENTS` | AFTER root, WHEN events stream has data | INSERT INTO curated events table from stream |
-| `TASK_REFRESH_METRICS` | AFTER both process tasks | MERGE INTO pipeline_metrics with latest KPI counts |
-
-Also creates `CONSUMPTION.PIPELINE_METRICS` table and starts all tasks with `ALTER TASK ... RESUME`.
-
-**Snowflake features demonstrated:**
-- `CREATE TASK` with `SCHEDULE`, `AFTER` dependencies, and `WHEN` conditions
-- `SYSTEM$STREAM_HAS_DATA()` for conditional execution
-- `MERGE INTO` for upsert patterns
-- `EXECUTE TASK` for manual triggering
-
-**Key constraint -- Tasks in same schema:**
-```sql
--- WRONG: AFTER cannot reference tasks in different schemas
-CREATE TASK CURATED.TASK_PROCESS AFTER RAW.TASK_ROOT ...;  -- ERROR!
-
--- CORRECT: All tasks in the same schema
-CREATE TASK RAW.TASK_PROCESS AFTER RAW.TASK_ROOT ...;
-```
-
-**What to observe:** Go to Activity > Task History in Snowsight to see the DAG execution timeline. The root task fires every 5 minutes, child tasks only execute when their stream has data.
+| # | Topic | Feature | File | Key Concepts |
+|---|-------|---------|------|-------------|
+| 33 | **Pipeline Monitoring** | Observability | 18 | INFORMATION_SCHEMA views, SYSTEM$ functions, data quality checks |
+| 34 | **Incremental Testing** | CDC Validation | 19 | Insert→stream→task→DT refresh→verify counts |
+| 35 | **EXPLAIN Plans** | Query Profiling | 20 | EXPLAIN USING TABULAR/JSON, execution plan analysis |
+| 36 | **Clustering** | Storage Optimization | 20 | CLUSTER BY, SYSTEM$CLUSTERING_INFORMATION, automatic clustering |
+| 37 | **Search Optimization** | Point Lookup Speed | 20 | ADD SEARCH OPTIMIZATION ON EQUALITY/SUBSTRING |
+| 38 | **Result Caching** | Query Cache | 20 | USE_CACHED_RESULT, PERCENTAGE_SCANNED_FROM_CACHE |
+| 39 | **Resource Monitors** | Cost Guardrails | 20 | CREDIT_QUOTA, TRIGGERS, NOTIFY/SUSPEND/SUSPEND_IMMEDIATE |
+| 40 | **Query Acceleration** | Elastic Compute | 20 | SYSTEM$ESTIMATE_QUERY_ACCELERATION, QUERY_ACCELERATION_ELIGIBLE |
 
 ---
 
-### 07_snowpark_sql_sheet.sql -- Advanced SQL Patterns
+## Object Inventory
 
-**Demonstrates 10 SQL techniques (run sections individually in Snowsight):**
+### Tables (BASE)
 
-1. **LATERAL FLATTEN** -- Exploding JSON arrays from ORDER_DETAILS into rows
-2. **Window functions: Running totals** -- `SUM() OVER (ORDER BY ...)` for cumulative revenue
-3. **Window functions: LAG** -- Previous order comparison per customer
-4. **Window functions: RANK** -- Product rankings within categories
-5. **PIVOT** -- Payment method cross-tabulation (rows to columns)
-6. **UNPIVOT** -- Reversing pivoted data (columns to rows)
-7. **Funnel analysis** -- Page view -> Add to cart -> Checkout conversion rates
-8. **Time intelligence** -- Month-over-month revenue comparisons
-9. **Cohort analysis** -- Customer behavior by signup month
-10. **Complex aggregation** -- Multi-level GROUP BY with GROUPING SETS
+| Table | Rows | Key Columns |
+|-------|------|-------------|
+| CUSTOMERS | 2,000 | CUSTOMER_ID, FIRST_NAME, LAST_NAME, CITY, COUNTRY, ANNUAL_INCOME, CREDIT_SCORE |
+| ACCOUNTS | 3,000 | ACCOUNT_ID, CUSTOMER_ID, ACCOUNT_TYPE, BALANCE, CREDIT_LIMIT, STATUS |
+| TRANSACTIONS | 10,000 | TXN_ID, ACCOUNT_ID, TXN_DATE, TXN_TYPE, AMOUNT, CATEGORY, CHANNEL, IS_FLAGGED |
+| RISK_ASSESSMENTS | 2,000 | ASSESSMENT_ID, CUSTOMER_ID, ASSESSED_AT, RISK_DATA (VARIANT) |
+| MARKET_DATA | 5,000 | DATA_ID, TICKER, TRADE_DATE, MARKET_DATA (VARIANT) |
+| SUPPORT_TICKETS | 1,000 | TICKET_ID, CUSTOMER_ID, SUBJECT, BODY (TEXT), PRIORITY, RESOLUTION_STATUS |
+| COMPLIANCE_DOCUMENTS | 200 | DOC_ID, DOC_TYPE, DOC_CONTENT (TEXT), METADATA (VARIANT) |
 
-**What to observe:** Run each section one at a time and examine the output. The funnel analysis section is particularly interesting -- it shows conversion drop-off rates at each stage.
+### Dynamic Tables
 
----
+| Schema | Table | TARGET_LAG | Refresh Mode | Rows |
+|--------|-------|-----------|-------------|------|
+| CURATED | DT_CUSTOMER_PROFILE | 1 minute | FULL | 2,000 |
+| CURATED | DT_TRANSACTION_ENRICHED | 1 minute | FULL | 10,000 |
+| CURATED | DT_SUPPORT_ENRICHED | 1 minute | FULL | 1,000 |
+| CURATED | DT_RISK_FACTORS_PARSED | 1 minute | INCREMENTAL | 6,000 |
+| CONSUMPTION | DT_CUSTOMER_360 | DOWNSTREAM | FULL | 2,000 |
+| CONSUMPTION | DT_DAILY_FINANCIAL_METRICS | DOWNSTREAM | FULL | 181 |
+| CONSUMPTION | DT_RISK_DASHBOARD | DOWNSTREAM | FULL | 1,273 |
+| CONSUMPTION | DT_CHANNEL_PERFORMANCE | DOWNSTREAM | FULL | 905 |
+| CONSUMPTION | DT_CHURN_FEATURES | 5 minutes | FULL | 2,000 |
+| CONSUMPTION | DT_MONTHLY_REVENUE | 5 minutes | FULL | 7 |
 
-### 08_snowpark_python_notebook.ipynb -- Snowpark Python Demo
+### Streams (RAW)
 
-**How to use:** Upload to Snowflake via Notebooks > + > Import .ipynb
+CUSTOMERS_STREAM, ACCOUNTS_STREAM, TRANSACTIONS_STREAM, RISK_ASSESSMENTS_STREAM, MARKET_DATA_STREAM, SUPPORT_TICKETS_STREAM, COMPLIANCE_DOCS_STREAM
 
-**17 cells (9 code, 8 markdown) covering:**
+### Tasks (RAW)
 
-1. Snowpark Session and `session.table()` API
-2. DataFrame operations: `filter()`, `group_by()`, `join()`, `with_column()`
-3. VARIANT column processing with `col['path']` accessor syntax
-4. Window functions in Snowpark: `Window.partition_by().order_by()`
-5. Writing enriched DataFrames back to tables with `df.write.save_as_table()`
-6. Querying dynamic tables from Python
-7. Matplotlib visualizations of pipeline data
+| Task | Schedule | Predecessors |
+|------|----------|-------------|
+| TASK_ROOT_SCHEDULER | 5 MINUTE | — |
+| TASK_PROCESS_TRANSACTIONS | — | TASK_ROOT_SCHEDULER |
+| TASK_PROCESS_TICKETS | — | TASK_ROOT_SCHEDULER |
+| TASK_REFRESH_METRICS | — | TASK_PROCESS_TRANSACTIONS, TASK_PROCESS_TICKETS |
 
-**What to observe:** Each cell builds on the previous one. The notebook walks through the entire pipeline using Python instead of SQL, demonstrating equivalent Snowpark operations.
+### Cortex AI Services
 
----
+| Object | Type | Schema |
+|--------|------|--------|
+| SEARCH_SUPPORT_TICKETS | Cortex Search Service | CONSUMPTION |
+| SEARCH_COMPLIANCE_DOCS | Cortex Search Service | CONSUMPTION |
+| FINSERV_MCP_SERVER | Managed MCP Server | CONSUMPTION |
+| CORTEX_STAGE | Stage (semantic model) | CONSUMPTION |
 
-### 09_snowpark_python_sheet.sql -- Python Stored Procedures, UDTFs, UDFs
+### Snowpark Python Objects (CONSUMPTION)
 
-**Creates 5 Python-in-Snowflake objects:**
-
-| Object | Type | What it does |
+| Object | Type | Description |
 |--------|------|-------------|
-| `SP_PROCESS_ORDERS` | Stored Procedure | Reads stream data and inserts into curated tables |
-| `SP_RFM_SEGMENTATION` | Stored Procedure | Recency-Frequency-Monetary customer scoring -> writes `CUSTOMER_RFM` table |
-| `PARSE_EVENT_DETAILS` | UDTF | Explodes event JSON into multiple typed rows (table function) |
-| `CATEGORIZE_ORDER` | UDF | Classifies order value as SMALL/MEDIUM/LARGE/PREMIUM |
-| `SP_PIPELINE_SUMMARY` | Stored Procedure | Reports row counts across all pipeline objects |
-
-**Snowflake features demonstrated:**
-- `CREATE PROCEDURE ... LANGUAGE PYTHON` with `PACKAGES = ('snowflake-snowpark-python')`
-- `CREATE FUNCTION ... LANGUAGE PYTHON` for scalar UDFs
-- UDTF with `process()` method for multi-row output
-- Python handler functions with Snowpark session
-
-**How to test after creating:**
-```sql
-CALL SP_PIPELINE_SUMMARY();
-SELECT CATEGORIZE_ORDER(500.00);
-SELECT * FROM TABLE(PARSE_EVENT_DETAILS(PARSE_JSON('{"page":"/home"}')));
-CALL SP_RFM_SEGMENTATION();
-SELECT * FROM CONSUMPTION.CUSTOMER_RFM;
-```
-
----
-
-### 10_monitoring_and_demo.sql -- Monitoring & Validation
-
-**Provides ready-to-run queries for:**
-
-1. **Pipeline validation** -- Row counts across all 3 layers (RAW, CURATED, CONSUMPTION)
-2. **Dynamic Table refresh history** -- `INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY()`
-3. **Task execution history** -- `INFORMATION_SCHEMA.TASK_HISTORY()` with status/duration
-4. **Stream status checks** -- Which streams have pending data
-5. **Data quality spot-checks** -- Verify data integrity across joins
-6. **Cleanup commands** -- DROP DATABASE/WAREHOUSE (commented out for safety)
-
-**What to observe:** Run the validation section first to confirm expected row counts:
-
-| Layer | Table | Expected Rows (initial) |
-|-------|-------|------------------------|
-| RAW | CUSTOMERS | 12 |
-| RAW | PRODUCTS | 12 |
-| RAW | ORDERS | 15 |
-| RAW | WEBSITE_EVENTS | 31 |
-| CURATED | DT_CUSTOMER_SUMMARY | 12 |
-| CURATED | DT_ORDER_ENRICHED | ~37 |
-| CURATED | DT_EVENT_PARSED | 31 |
-| CONSUMPTION | DT_DAILY_SALES | ~15 |
-| CONSUMPTION | DT_PRODUCT_PERFORMANCE | 12 |
-| CONSUMPTION | DT_CUSTOMER_360 | 12 |
-| CONSUMPTION | DT_CATEGORY_TRENDS | ~24 |
-
----
-
-### 12_incremental_test_data.sql -- End-to-End Pipeline Test
-
-**Purpose:** Insert new data into RAW tables to test incremental pipeline processing and verify that changes propagate through streams, dynamic tables, and appear in the dashboard.
-
-**What gets inserted:**
-
-| Section | Data | Details |
-|---------|------|---------|
-| Section B | 3 new customers | Maya (Miami, USA), Raj (Bangalore, India), Sophie (Berlin, Germany) |
-| Section C | 2 new products | Monitor Arm ($89.99, Accessories), Wireless Charger ($35.00, Electronics) |
-| Section D | 5 new orders | Mix of new (Maya, Raj, Sophie) and existing (Alice, Bob) customers, with VARIANT JSON |
-| Section E | 16 new events | Browsing sessions including a cart-abandon-then-return scenario (Sophie) |
-
-**Verification sections:**
-
-| Section | Purpose |
-|---------|---------|
-| A | Capture BEFORE row counts across all layers |
-| F | Verify streams have `HAS_DATA = TRUE` after inserts |
-| G | Manually trigger the task DAG with `EXECUTE TASK` |
-| H | Capture AFTER row counts (run 2-5 minutes after G) |
-| I | Expected changes summary reference |
-| J | Spot-check specific new data in consumption tables |
-
-**Expected changes after pipeline runs:**
-
-| Table | Before | After | Change |
-|-------|--------|-------|--------|
-| RAW.CUSTOMERS | 12 | 15 | +3 new customers |
-| RAW.PRODUCTS | 12 | 14 | +2 new products |
-| RAW.ORDERS | 15 | 20 | +5 new orders |
-| RAW.WEBSITE_EVENTS | 31 | 47 | +16 new events |
-| CURATED.DT_CUSTOMER_SUMMARY | 12 | 15 | +3 new customer summaries |
-| CURATED.DT_ORDER_ENRICHED | ~37 | ~50 | +line items from 5 orders |
-| CONSUMPTION.DT_DAILY_SALES | ~15 | ~19 | +4 new September dates |
-| CONSUMPTION.DT_PRODUCT_PERFORMANCE | 12 | 14 | +2 new products |
-| CONSUMPTION.DT_CUSTOMER_360 | 12 | 15 | +3 new customers |
-
----
-
-## Deployment Guide
-
-### Step 1: Initial Setup (run once, in order)
-
-Open a **SQL Worksheet** in Snowsight and run each file sequentially:
-
-```
-01_setup_database.sql    --> Creates warehouse, database, schemas
-02_raw_data_load.sql     --> Creates tables and loads sample data
-03_streams.sql           --> Creates CDC streams
-04_curated_layer.sql     --> Creates curated MVs and dynamic tables
-05_consumption_layer.sql --> Creates consumption dynamic tables
-06_tasks_and_dag.sql     --> Creates and starts the task DAG
-```
-
-After step 06, **wait 1-2 minutes** for dynamic tables to complete their initial refresh.
-
-### Step 2: Verify Pipeline
-
-Run the validation section of `10_monitoring_and_demo.sql` to confirm all objects have expected row counts (see table above).
-
-### Step 3: Interactive Demos (any order)
-
-- **SQL patterns:** Open `07_snowpark_sql_sheet.sql` in Snowsight, run sections individually
-- **Python notebook:** Upload `08_snowpark_python_notebook.ipynb` as a Snowflake Notebook (Notebooks > + > Import .ipynb), run cells top to bottom
-- **Python in SQL:** Open `09_snowpark_python_sheet.sql` in Snowsight, creates and calls SPs/UDTFs/UDFs
-
-### Step 4: Test Incremental Pipeline
-
-Run `12_incremental_test_data.sql` in a SQL Worksheet:
-
-1. Run **Sections A-E** to capture baseline and insert new data
-2. Run **Section F** to verify streams have data
-3. Run **Section G** to trigger the DAG manually
-4. **Wait 2-5 minutes** for dynamic tables to refresh
-5. Run **Sections H-J** to verify consumption tables updated
-
-### Step 5: Launch Dashboard
-
-See [Streamlit Deployment](#streamlit-deployment) below.
-
----
-
-## Streamlit Dashboard
-
-### What the dashboard shows
-
-The dashboard (`11_streamlit_dashboard.py`) has **5 tabs** that visualize the CONSUMPTION layer:
-
-| Tab | Content |
-|-----|---------|
-| **Overview** | KPI cards (revenue, orders, customers, avg order value, events, sessions), daily revenue bar chart, orders/customers line chart, payment method split, order status donut, cumulative revenue area chart |
-| **Products** | Product KPIs, category filter (segmented control), revenue-by-product bar chart, units vs buyers scatter, list price vs sold price comparison, detailed data table |
-| **Customers** | Customer KPIs (total, avg LTV, high-value count, avg conversion), segment donut chart, top customers by LTV, revenue by country, engagement data table with progress bars |
-| **Category Trends** | Category KPIs, monthly revenue stacked area chart, monthly units sold bar chart, category revenue share donut, sub-category breakdown table |
-| **Pipeline Health** | Layer row count KPIs, pipeline row count bar chart (color-coded by layer), stream CDC status, task DAG status, dynamic table refresh history, pipeline metrics snapshot |
-
-### Streamlit Deployment
-
-#### Option A: Run Locally
-
-1. Install dependencies:
-   ```bash
-   pip install streamlit snowflake-connector-python snowflake-snowpark-python altair pandas
-   ```
-
-2. Create `.streamlit/secrets.toml` in the project directory:
-   ```toml
-   [connections.snowflake]
-   account = "YOUR_ORG-YOUR_ACCOUNT"
-   user = "your_username"
-   authenticator = "externalbrowser"
-   warehouse = "HOL_WH"
-   database = "HOL_DB"
-   schema = "CONSUMPTION"
-   ```
-
-3. Run:
-   ```bash
-   streamlit run 11_streamlit_dashboard.py
-   ```
-
-4. The dashboard opens at `http://localhost:8501`. Click "Refresh Data" to reload from Snowflake.
-
-#### Option B: Deploy as Streamlit-in-Snowflake (SiS)
-
-1. In Snowsight, go to **Streamlit** > **+ Streamlit App**
-2. Set the database to `HOL_DB`, schema to `CONSUMPTION`, warehouse to `HOL_WH`
-3. Replace the default code with the contents of `11_streamlit_dashboard.py`
-4. The app uses `get_active_session()` automatically -- no secrets needed
-5. Add `altair` to the packages list if prompted
-
----
-
-## Testing Incremental Data with the Dashboard
-
-This is the complete end-to-end workflow to verify the pipeline works:
-
-1. **Open the dashboard** (locally or in Snowsight)
-2. **Note the current values** on the Overview tab (revenue, orders, customers)
-3. **Open a SQL Worksheet** alongside the dashboard
-4. **Run `12_incremental_test_data.sql` Sections A through G** to insert new data and trigger the DAG
-5. **Wait 2-5 minutes** for dynamic tables to refresh
-6. **Click "Refresh Data"** in the dashboard header
-7. **Observe the changes across all tabs:**
-   - **Overview**: Revenue increases, order/customer counts go up, new September bars in daily sales, cumulative revenue line extends
-   - **Products**: "Monitor Arm" and "Wireless Charger" appear in product charts
-   - **Customers**: Maya, Raj, and Sophie appear in customer insights; new countries (USA, Germany) in geographic chart
-   - **Category Trends**: September entries appear in stacked area chart
-   - **Pipeline Health**: Row counts increase across all layers, refresh history shows new entries
-
----
-
-## Features Demonstrated
-
-| Feature | Where Used |
-|---------|-----------|
-| **Database / Schema / Warehouse** | `01_setup_database.sql` |
-| **Structured Tables** | `02_raw_data_load.sql` -- CUSTOMERS, PRODUCTS |
-| **Semi-Structured (VARIANT)** | `02_raw_data_load.sql` -- ORDERS, WEBSITE_EVENTS |
-| **Streams (CDC)** | `03_streams.sql` -- append-only and standard streams |
-| **Dynamic Tables** | `04`, `05` -- 7 dynamic tables with TARGET_LAG chains |
-| **Materialized Views** | `04` -- MV_CUSTOMER_DIRECTORY, `05` -- MV_PRODUCT_CATALOG |
-| **Tasks & DAG** | `06` -- root + child + grandchild tasks (all in RAW) |
-| **LATERAL FLATTEN** | `04`, `07` -- explode JSON arrays |
-| **Window Functions** | `07` -- running totals, LAG, RANK |
-| **PIVOT / UNPIVOT** | `07` -- payment method cross-tab |
-| **Snowpark Python DataFrames** | `08` -- end-to-end Python pipeline |
-| **Python Stored Procedures** | `09` -- SP_PROCESS_ORDERS, SP_RFM_SEGMENTATION |
-| **Python UDTF** | `09` -- PARSE_EVENT_DETAILS |
-| **Python UDF** | `09` -- CATEGORIZE_ORDER |
-| **Streamlit Dashboard** | `11` -- 5-tab interactive analytics with 15+ charts |
-| **Incremental Pipeline Test** | `12` -- end-to-end with before/after validation |
+| SP_RFM_SEGMENTATION | Stored Procedure | RFM customer segmentation |
+| SP_PROCESS_TRANSACTIONS | Stored Procedure | Transaction channel summary |
+| SP_PIPELINE_SUMMARY | Stored Procedure (TABLE) | Pipeline health report |
+| ANOMALY_SCORE | UDF | Z-score anomaly detection |
+| RISK_TIER | UDF | Composite risk tier |
+| PARSE_RISK_FACTORS | UDTF | Parse VARIANT risk data |
 
 ---
 
 ## Troubleshooting
 
-### "Materialized view cannot contain joins"
-Snowflake MVs are single-table only. Use Dynamic Tables for multi-table aggregations.
-
-### "Task predecessor must be in the same schema"
-All tasks with AFTER dependencies must share a schema. This demo puts all tasks in RAW.
-
-### "PARSE_JSON cannot be used in VALUES"
-Use the `SELECT ... UNION ALL` pattern instead of `VALUES (... PARSE_JSON(...))`.
-
-### Dynamic tables not refreshing
-- Check refresh history: `SELECT * FROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY())` for errors
-- Ensure the warehouse is running: `ALTER WAREHOUSE HOL_WH RESUME`
-- Verify TARGET_LAG is set: `SHOW DYNAMIC TABLES IN DATABASE HOL_DB`
-
-### Streams show HAS_DATA = FALSE after insert
-- Streams are consumed when read by a DML. If a task already processed the data, the stream resets.
-- Insert more data and check again.
-
-### Streamlit "No module named snowflake"
-- Install: `pip install snowflake-connector-python snowflake-snowpark-python`
-- On Python 3.12+, explicitly add `snowflake-connector-python>=3.3.0`
-
-### Task not firing
-- Verify tasks are resumed: `SHOW TASKS IN SCHEMA RAW`
-- Check the WHEN condition: streams must have data for child tasks to execute
-- Trigger manually: `EXECUTE TASK RAW.TASK_ROOT_SCHEDULER`
-
-### Dashboard shows stale data after incremental insert
-- Dynamic Tables need 1-5 minutes to refresh depending on their `TARGET_LAG`
-- Click "Refresh Data" button in the dashboard header after waiting
-- Check the Pipeline Health tab for Dynamic Table refresh history
-
-### Incremental test data not appearing in dashboard
-- Confirm streams picked up the data (Section F should show `TRUE`)
-- Confirm the DAG ran (Section G or check Activity > Task History)
-- Wait for DT_CUSTOMER_360 specifically (has 5-minute TARGET_LAG)
-- Run Section H to verify CONSUMPTION row counts changed
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| `ASSESSMENT_DATE` not found | Column is named `ASSESSED_AT` in DDL | Use `ASSESSED_AT` |
+| `RISK_DATA:risk_level` returns NULL | Field is `credit_history` (string) | Use `RISK_DATA:credit_history` |
+| `RISK_DATA:factors` not found | Field is `risk_factors` (array) | Use `RISK_DATA:risk_factors` |
+| `COUNT(*) AS ROWS` fails | `ROWS` is a reserved word | Use `ROW_COUNT` |
+| DT shows FULL refresh mode | Complex queries (subqueries, CURRENT_TIMESTAMP, upstream FULL) | Expected behavior; no fix needed |
+| Cortex Agent DDL fails | `CREATE CORTEX AGENT` not available in all regions | Skip agent creation; Search services work independently |
+| Snowpipe creation fails | No real S3 bucket configured | Deploy file format + landing tables only |
+| Insufficient privileges | Wrong role or connection | Use ACCOUNTADMIN role on default connection |
 
 ---
 
-## Cleanup
+## License
 
-Uncomment and run the cleanup section at the bottom of `10_monitoring_and_demo.sql`:
-
-```sql
--- Suspend tasks (leaf tasks first, root last)
-ALTER TASK RAW.TASK_REFRESH_METRICS SUSPEND;
-ALTER TASK RAW.TASK_PROCESS_EVENTS  SUSPEND;
-ALTER TASK RAW.TASK_PROCESS_ORDERS  SUSPEND;
-ALTER TASK RAW.TASK_ROOT_SCHEDULER  SUSPEND;
-
--- Drop everything
-DROP DATABASE IF EXISTS HOL_DB;
-DROP WAREHOUSE IF EXISTS HOL_WH;
-```
+Internal demo project — not for production use.
