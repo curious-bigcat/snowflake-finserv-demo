@@ -24,7 +24,7 @@ $$
 def rfm_segmentation(session):
     from snowflake.snowpark.functions import (
         col, count, sum as sum_, max as max_,
-        datediff, current_timestamp, lit, when, ntile
+        datediff, current_timestamp, lit, when, ntile, concat
     )
     from snowflake.snowpark import Window
 
@@ -59,17 +59,24 @@ def rfm_segmentation(session):
         .otherwise(lit("Needs Attention"))
     )
 
-    # Join with customer details
+    # Join with customer details and select columns in explicit order
     result = segmented.join(
         customers.select(
             col("CUSTOMER_ID"),
-            (col("FIRST_NAME") + lit(" ") + col("LAST_NAME")).alias("CUSTOMER_NAME"),
+            concat(col("FIRST_NAME"), lit(" "), col("LAST_NAME")).alias("CUSTOMER_NAME"),
             col("EMAIL"), col("CITY"), col("COUNTRY")
         ),
         "CUSTOMER_ID"
+    ).select(
+        col("CUSTOMER_ID"), col("CUSTOMER_NAME"), col("EMAIL"),
+        col("CITY"), col("COUNTRY"),
+        col("RECENCY_DAYS"), col("FREQUENCY"), col("MONETARY"),
+        col("R_SCORE"), col("F_SCORE"), col("M_SCORE"),
+        col("RFM_SCORE"), col("SEGMENT")
     )
 
-    result.write.mode("overwrite").save_as_table("FINSERV_DB.CONSUMPTION.CUSTOMER_RFM")
+    session.sql("DROP TABLE IF EXISTS FINSERV_DB.CONSUMPTION.CUSTOMER_RFM").collect()
+    result.write.save_as_table("FINSERV_DB.CONSUMPTION.CUSTOMER_RFM")
     row_count = session.table("FINSERV_DB.CONSUMPTION.CUSTOMER_RFM").count()
     return f"SUCCESS: RFM segmentation complete for {row_count} customers"
 $$;
@@ -98,7 +105,7 @@ HANDLER = 'process_transactions'
 AS
 $$
 def process_transactions(session):
-    from snowflake.snowpark.functions import col, lit, current_timestamp
+    from snowflake.snowpark.functions import col, lit, current_timestamp, concat
 
     txns = session.table("FINSERV_DB.BASE.TRANSACTIONS")
     accounts = session.table("FINSERV_DB.BASE.ACCOUNTS").select(
@@ -110,7 +117,7 @@ def process_transactions(session):
     )
     customers = session.table("FINSERV_DB.BASE.CUSTOMERS").select(
         col("CUSTOMER_ID"),
-        (col("FIRST_NAME") + lit(" ") + col("LAST_NAME")).alias("CUSTOMER_NAME"),
+        concat(col("FIRST_NAME"), lit(" "), col("LAST_NAME")).alias("CUSTOMER_NAME"),
         col("CITY").alias("CUSTOMER_CITY"),
         col("COUNTRY").alias("CUSTOMER_COUNTRY"),
         col("CREDIT_SCORE")
