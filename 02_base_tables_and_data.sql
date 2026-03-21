@@ -32,31 +32,134 @@ CREATE OR REPLACE TABLE CUSTOMERS (
 
 INSERT INTO CUSTOMERS (FIRST_NAME, LAST_NAME, EMAIL, PHONE, DATE_OF_BIRTH,
                        CITY, STATE, COUNTRY, ANNUAL_INCOME, EMPLOYMENT_STATUS, CREDIT_SCORE, SIGNUP_DATE)
+WITH BASE AS (
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY SEQ4()) AS RN,
+        -- 100 diverse international first names
+        ARRAY_CONSTRUCT(
+            'James','Michael','Robert','David','John','William','Daniel','Matthew',
+            'Andrew','Christopher','Joseph','Ryan','Alexander','Benjamin','Samuel',
+            'Nathan','Jacob','Ethan','Noah','Oliver','Lucas','Mason','Logan','Leo',
+            'Felix','Liam','Aiden','Sebastian','Henry','Oscar',
+            'Isaac','Gabriel','Julian','Adrian',
+            'Mary','Jennifer','Sarah','Jessica','Emily','Amanda','Ashley','Elizabeth',
+            'Sophia','Emma','Olivia','Isabella','Mia','Ava','Charlotte','Amelia',
+            'Harper','Abigail','Ella','Grace','Chloe','Lily','Hannah','Zoe',
+            'Ruby','Alice','Stella','Hazel','Aurora','Luna','Ellie','Violet',
+            'Raj','Arjun','Vikram','Priya','Ananya','Neha','Aditya','Kavya',
+            'Hiroshi','Kenji','Sakura','Yuki','Yuto','Hana',
+            'Wei','Mei','Lin','Jing',
+            'Mohammed','Omar','Fatima','Aisha',
+            'Carlos','Miguel','Pedro','Maria','Ana','Sofia',
+            'Marco','Luca','Lars','Astrid','Pierre','Claire'
+        )[UNIFORM(0,99,RANDOM())]::VARCHAR AS FIRST_NAME,
+        -- 80 diverse international last names
+        ARRAY_CONSTRUCT(
+            'Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis',
+            'Rodriguez','Martinez','Anderson','Taylor','Thomas','Hernandez','Moore',
+            'Martin','Jackson','Thompson','White','Harris','Clark','Lewis','Robinson',
+            'Walker','Young','Allen','King','Wright','Scott','Green',
+            'Patel','Shah','Kumar','Singh','Gupta','Sharma','Reddy','Nair',
+            'Nakamura','Tanaka','Yamamoto','Suzuki','Sato','Watanabe',
+            'Wang','Li','Zhang','Chen','Liu','Yang',
+            'Kim','Park','Lee','Cho','Jung',
+            'Ahmed','Ali','Khan','Hassan','Ibrahim',
+            'Silva','Santos','Oliveira','Costa','Ferreira',
+            'Mueller','Schmidt','Fischer','Weber','Schneider',
+            'Dubois','Laurent','Moreau','Bernard','Petit',
+            'Nielsen','Berg','Lindqvist','Johansson','Eriksson'
+        )[UNIFORM(0,79,RANDOM())]::VARCHAR AS LAST_NAME,
+        -- Location index (keeps city/state/country correlated)
+        UNIFORM(0,21,RANDOM()) AS LOC_IDX,
+        UNIFORM(0,11,RANDOM()) AS DOMAIN_IDX,
+        UNIFORM(0,4,RANDOM()) AS EMAIL_STYLE,
+        DATEADD('day', -UNIFORM(7300, 25550, RANDOM()), CURRENT_DATE()) AS DATE_OF_BIRTH,
+        DATEADD('day', -UNIFORM(0, 730, RANDOM()), CURRENT_TIMESTAMP()) AS SIGNUP_DATE,
+        -- Weighted employment: ~55% employed, 15% self-employed, 15% retired, 10% student, 5% unemployed
+        ARRAY_CONSTRUCT('EMPLOYED','EMPLOYED','EMPLOYED','EMPLOYED','EMPLOYED',
+                        'EMPLOYED','EMPLOYED','EMPLOYED','EMPLOYED','EMPLOYED','EMPLOYED',
+                        'SELF_EMPLOYED','SELF_EMPLOYED','SELF_EMPLOYED',
+                        'RETIRED','RETIRED','RETIRED',
+                        'STUDENT','STUDENT',
+                        'UNEMPLOYED')[UNIFORM(0,19,RANDOM())]::VARCHAR AS EMP_STATUS
+    FROM TABLE(GENERATOR(ROWCOUNT => 2000))
+)
 SELECT
-    'First_' || SEQ4()                                   AS FIRST_NAME,
-    'Last_'  || UNIFORM(1, 500, RANDOM())                AS LAST_NAME,
-    'user_'  || SEQ4() || '@example.com'                 AS EMAIL,
-    '+1-' || LPAD(UNIFORM(200,999,RANDOM())::TEXT,3,'0')
-         || '-' || LPAD(UNIFORM(1000,9999,RANDOM())::TEXT,4,'0') AS PHONE,
-    DATEADD('day', -UNIFORM(7300, 25550, RANDOM()), CURRENT_DATE()) AS DATE_OF_BIRTH,
-    ARRAY_CONSTRUCT('New York','London','Singapore','Tokyo','Sydney',
-                    'Toronto','Mumbai','Dubai','Sao Paulo','Berlin',
-                    'Paris','Chicago','Hong Kong','Seoul','Zurich')
-        [UNIFORM(0,14,RANDOM())]::VARCHAR                AS CITY,
-    ARRAY_CONSTRUCT('NY','England','Central','Kanto','NSW',
-                    'ON','MH','Dubai','SP','Berlin',
-                    'IDF','IL','HK','Seoul','ZH')
-        [UNIFORM(0,14,RANDOM())]::VARCHAR                AS STATE,
-    ARRAY_CONSTRUCT('USA','UK','Singapore','Japan','Australia',
-                    'Canada','India','UAE','Brazil','Germany',
-                    'France','USA','Hong Kong','South Korea','Switzerland')
-        [UNIFORM(0,14,RANDOM())]::VARCHAR                AS COUNTRY,
-    ROUND(UNIFORM(25000, 500000, RANDOM()), 2)           AS ANNUAL_INCOME,
-    ARRAY_CONSTRUCT('EMPLOYED','SELF_EMPLOYED','RETIRED','STUDENT','UNEMPLOYED')
-        [UNIFORM(0,4,RANDOM())]::VARCHAR                 AS EMPLOYMENT_STATUS,
-    UNIFORM(300, 850, RANDOM())                          AS CREDIT_SCORE,
-    DATEADD('day', -UNIFORM(0, 730, RANDOM()), CURRENT_TIMESTAMP()) AS SIGNUP_DATE
-FROM TABLE(GENERATOR(ROWCOUNT => 2000));
+    FIRST_NAME,
+    LAST_NAME,
+    -- Realistic email built from name parts
+    CASE EMAIL_STYLE
+        WHEN 0 THEN LOWER(FIRST_NAME) || '.' || LOWER(LAST_NAME)
+        WHEN 1 THEN LOWER(FIRST_NAME) || LOWER(LAST_NAME)
+        WHEN 2 THEN LOWER(FIRST_NAME) || '_' || LOWER(LAST_NAME)
+        WHEN 3 THEN LOWER(FIRST_NAME) || '.' || LOWER(LAST_NAME) || LPAD(MOD(RN*7,100)::TEXT,2,'0')
+        ELSE LOWER(FIRST_NAME) || LOWER(LAST_NAME) || LPAD(MOD(RN*13,1000)::TEXT,3,'0')
+    END || '@' ||
+    ARRAY_CONSTRUCT('gmail.com','yahoo.com','outlook.com','icloud.com','hotmail.com',
+                    'protonmail.com','aol.com','mail.com','zoho.com','fastmail.com',
+                    'hey.com','gmx.com')[DOMAIN_IDX]::VARCHAR AS EMAIL,
+    -- Phone with country-appropriate dial code
+    CASE ARRAY_CONSTRUCT('USA','USA','USA','USA','USA',
+                         'UK','UK','Singapore','Japan','Australia',
+                         'Australia','Canada','Canada','India','UAE',
+                         'Brazil','Germany','Germany','France','Switzerland',
+                         'Hong Kong','South Korea')[LOC_IDX]::VARCHAR
+        WHEN 'USA'         THEN '+1'
+        WHEN 'UK'          THEN '+44'
+        WHEN 'Canada'      THEN '+1'
+        WHEN 'Australia'   THEN '+61'
+        WHEN 'Japan'       THEN '+81'
+        WHEN 'Germany'     THEN '+49'
+        WHEN 'India'       THEN '+91'
+        WHEN 'Singapore'   THEN '+65'
+        WHEN 'UAE'         THEN '+971'
+        WHEN 'Brazil'      THEN '+55'
+        WHEN 'France'      THEN '+33'
+        WHEN 'Switzerland' THEN '+41'
+        WHEN 'Hong Kong'   THEN '+852'
+        WHEN 'South Korea' THEN '+82'
+    END || '-' ||
+    LPAD(UNIFORM(200,999,RANDOM())::TEXT,3,'0') || '-' ||
+    LPAD(UNIFORM(100,999,RANDOM())::TEXT,3,'0') || '-' ||
+    LPAD(UNIFORM(1000,9999,RANDOM())::TEXT,4,'0') AS PHONE,
+    DATE_OF_BIRTH,
+    -- 22 international cities (correlated city/state/country via LOC_IDX)
+    ARRAY_CONSTRUCT('New York','Los Angeles','Chicago','Houston','Miami',
+                    'London','Manchester','Singapore','Tokyo','Sydney',
+                    'Melbourne','Toronto','Vancouver','Mumbai','Dubai',
+                    'Sao Paulo','Berlin','Frankfurt','Paris','Zurich',
+                    'Hong Kong','Seoul')[LOC_IDX]::VARCHAR AS CITY,
+    ARRAY_CONSTRUCT('NY','CA','IL','TX','FL',
+                    'England','England','Central','Kanto','NSW',
+                    'VIC','ON','BC','MH','Dubai',
+                    'SP','Berlin','Hessen','IDF','ZH',
+                    'HK','Seoul')[LOC_IDX]::VARCHAR AS STATE,
+    ARRAY_CONSTRUCT('USA','USA','USA','USA','USA',
+                    'UK','UK','Singapore','Japan','Australia',
+                    'Australia','Canada','Canada','India','UAE',
+                    'Brazil','Germany','Germany','France','Switzerland',
+                    'Hong Kong','South Korea')[LOC_IDX]::VARCHAR AS COUNTRY,
+    -- Income correlated with employment status
+    ROUND(CASE EMP_STATUS
+        WHEN 'EMPLOYED'      THEN UNIFORM(30000, 350000, RANDOM())
+        WHEN 'SELF_EMPLOYED' THEN UNIFORM(20000, 500000, RANDOM())
+        WHEN 'RETIRED'       THEN UNIFORM(25000, 250000, RANDOM())
+        WHEN 'STUDENT'       THEN UNIFORM(5000, 45000, RANDOM())
+        WHEN 'UNEMPLOYED'    THEN UNIFORM(0, 35000, RANDOM())
+    END, 2) AS ANNUAL_INCOME,
+    EMP_STATUS AS EMPLOYMENT_STATUS,
+    -- Credit score correlated with employment status
+    LEAST(850, GREATEST(300,
+        CASE EMP_STATUS
+            WHEN 'EMPLOYED'      THEN UNIFORM(580, 820, RANDOM())
+            WHEN 'SELF_EMPLOYED' THEN UNIFORM(550, 800, RANDOM())
+            WHEN 'RETIRED'       THEN UNIFORM(620, 840, RANDOM())
+            WHEN 'STUDENT'       THEN UNIFORM(350, 700, RANDOM())
+            WHEN 'UNEMPLOYED'    THEN UNIFORM(300, 650, RANDOM())
+        END
+    )) AS CREDIT_SCORE,
+    SIGNUP_DATE
+FROM BASE;
 
 
 -- ============================================================
@@ -78,18 +181,47 @@ CREATE OR REPLACE TABLE ACCOUNTS (
 );
 
 INSERT INTO ACCOUNTS (CUSTOMER_ID, ACCOUNT_TYPE, BALANCE, CREDIT_LIMIT, INTEREST_RATE, OPENED_DATE, STATUS, BRANCH_CODE)
+WITH ACCT_BASE AS (
+    SELECT
+        UNIFORM(1, 2000, RANDOM()) AS CUSTOMER_ID,
+        -- Weighted: ~35% checking, ~30% savings, ~20% credit_card, ~15% investment
+        ARRAY_CONSTRUCT('CHECKING','CHECKING','CHECKING','CHECKING','CHECKING','CHECKING','CHECKING',
+                        'SAVINGS','SAVINGS','SAVINGS','SAVINGS','SAVINGS','SAVINGS',
+                        'CREDIT_CARD','CREDIT_CARD','CREDIT_CARD','CREDIT_CARD',
+                        'INVESTMENT','INVESTMENT','INVESTMENT')
+            [UNIFORM(0,19,RANDOM())]::VARCHAR AS ACCOUNT_TYPE,
+        DATEADD('day', -UNIFORM(30, 1825, RANDOM()), CURRENT_DATE()) AS OPENED_DATE,
+        ARRAY_CONSTRUCT('ACTIVE','ACTIVE','ACTIVE','INACTIVE','CLOSED')
+            [UNIFORM(0,4,RANDOM())]::VARCHAR AS STATUS,
+        'BR-' || LPAD(UNIFORM(1,50,RANDOM())::TEXT, 3, '0') AS BRANCH_CODE
+    FROM TABLE(GENERATOR(ROWCOUNT => 3000))
+)
 SELECT
-    UNIFORM(1, 2000, RANDOM())                           AS CUSTOMER_ID,
-    ARRAY_CONSTRUCT('CHECKING','SAVINGS','INVESTMENT','CREDIT_CARD')
-        [UNIFORM(0,3,RANDOM())]::VARCHAR                 AS ACCOUNT_TYPE,
-    ROUND(UNIFORM(100, 250000, RANDOM()), 2)             AS BALANCE,
-    CASE WHEN UNIFORM(0,3,RANDOM()) = 3 THEN UNIFORM(5000,100000,RANDOM()) ELSE 0 END AS CREDIT_LIMIT,
-    ROUND(UNIFORM(1, 2500, RANDOM()) / 10000.0, 4)      AS INTEREST_RATE,
-    DATEADD('day', -UNIFORM(30, 1825, RANDOM()), CURRENT_DATE()) AS OPENED_DATE,
-    ARRAY_CONSTRUCT('ACTIVE','ACTIVE','ACTIVE','INACTIVE','CLOSED')
-        [UNIFORM(0,4,RANDOM())]::VARCHAR                 AS STATUS,
-    'BR-' || LPAD(UNIFORM(1,50,RANDOM())::TEXT, 3, '0') AS BRANCH_CODE
-FROM TABLE(GENERATOR(ROWCOUNT => 3000));
+    CUSTOMER_ID,
+    ACCOUNT_TYPE,
+    -- Balance varies by account type
+    ROUND(CASE ACCOUNT_TYPE
+        WHEN 'CHECKING'    THEN UNIFORM(100, 50000, RANDOM())
+        WHEN 'SAVINGS'     THEN UNIFORM(500, 150000, RANDOM())
+        WHEN 'CREDIT_CARD' THEN UNIFORM(0, 25000, RANDOM())
+        WHEN 'INVESTMENT'  THEN UNIFORM(5000, 500000, RANDOM())
+    END, 2) AS BALANCE,
+    -- Credit limit only for credit cards
+    CASE ACCOUNT_TYPE
+        WHEN 'CREDIT_CARD' THEN UNIFORM(5000, 100000, RANDOM())
+        ELSE 0
+    END AS CREDIT_LIMIT,
+    -- Interest rate varies by account type
+    ROUND(CASE ACCOUNT_TYPE
+        WHEN 'CHECKING'    THEN UNIFORM(1, 50, RANDOM()) / 10000.0
+        WHEN 'SAVINGS'     THEN UNIFORM(150, 500, RANDOM()) / 10000.0
+        WHEN 'CREDIT_CARD' THEN UNIFORM(1500, 2500, RANDOM()) / 10000.0
+        WHEN 'INVESTMENT'  THEN UNIFORM(300, 1200, RANDOM()) / 10000.0
+    END, 4) AS INTEREST_RATE,
+    OPENED_DATE,
+    STATUS,
+    BRANCH_CODE
+FROM ACCT_BASE;
 
 
 -- ============================================================
@@ -111,23 +243,86 @@ CREATE OR REPLACE TABLE TRANSACTIONS (
 );
 
 INSERT INTO TRANSACTIONS (ACCOUNT_ID, TXN_DATE, TXN_TYPE, AMOUNT, MERCHANT_NAME, CATEGORY, CHANNEL, IS_FLAGGED)
+WITH TXN_BASE AS (
+    SELECT
+        UNIFORM(0,19,RANDOM()) AS M_IDX,
+        UNIFORM(1, 3000, RANDOM()) AS ACCOUNT_ID,
+        DATEADD('second', -UNIFORM(0, 15552000, RANDOM()), CURRENT_TIMESTAMP()) AS TXN_DATE,
+        UNIFORM(0,5,RANDOM()) AS CH_ROLL
+    FROM TABLE(GENERATOR(ROWCOUNT => 10000))
+),
+TXN_DETAIL AS (
+    SELECT
+        ACCOUNT_ID,
+        TXN_DATE,
+        CH_ROLL,
+        -- 20 real merchants
+        ARRAY_CONSTRUCT('Amazon','Walmart','Starbucks','Shell','Target',
+                        'Apple','Netflix','Uber','Delta Air Lines','Costco',
+                        'Home Depot','Whole Foods','Chase Transfer','Wire Transfer','ATM Withdrawal',
+                        'DoorDash','CVS Pharmacy','Verizon','Fidelity','Marriott')
+            [M_IDX]::VARCHAR AS MERCHANT_NAME,
+        -- Category correlated 1:1 with merchant
+        ARRAY_CONSTRUCT('SHOPPING','GROCERIES','DINING','FUEL','SHOPPING',
+                        'SHOPPING','ENTERTAINMENT','TRAVEL','TRAVEL','GROCERIES',
+                        'UTILITIES','GROCERIES','TRANSFER','TRANSFER','TRANSFER',
+                        'DINING','HEALTHCARE','UTILITIES','INVESTMENT','TRAVEL')
+            [M_IDX]::VARCHAR AS CATEGORY,
+        -- Amount range correlated with merchant (cents, divided by 100 later)
+        ROUND(CASE M_IDX
+            WHEN 0  THEN UNIFORM(500, 50000, RANDOM())
+            WHEN 1  THEN UNIFORM(1500, 25000, RANDOM())
+            WHEN 2  THEN UNIFORM(300, 1500, RANDOM())
+            WHEN 3  THEN UNIFORM(2000, 9000, RANDOM())
+            WHEN 4  THEN UNIFORM(1000, 30000, RANDOM())
+            WHEN 5  THEN UNIFORM(5000, 200000, RANDOM())
+            WHEN 6  THEN UNIFORM(700, 2300, RANDOM())
+            WHEN 7  THEN UNIFORM(800, 6000, RANDOM())
+            WHEN 8  THEN UNIFORM(15000, 140000, RANDOM())
+            WHEN 9  THEN UNIFORM(5000, 40000, RANDOM())
+            WHEN 10 THEN UNIFORM(1500, 60000, RANDOM())
+            WHEN 11 THEN UNIFORM(2000, 18000, RANDOM())
+            WHEN 12 THEN UNIFORM(10000, 500000, RANDOM())
+            WHEN 13 THEN UNIFORM(50000, 500000, RANDOM())
+            WHEN 14 THEN UNIFORM(2000, 50000, RANDOM())
+            WHEN 15 THEN UNIFORM(1500, 6500, RANDOM())
+            WHEN 16 THEN UNIFORM(500, 15000, RANDOM())
+            WHEN 17 THEN UNIFORM(4000, 20000, RANDOM())
+            WHEN 18 THEN UNIFORM(20000, 500000, RANDOM())
+            ELSE         UNIFORM(10000, 50000, RANDOM())
+        END / 100.0, 2) AS AMOUNT
+    FROM TXN_BASE
+)
 SELECT
-    UNIFORM(1, 3000, RANDOM())                           AS ACCOUNT_ID,
-    DATEADD('second', -UNIFORM(0, 15552000, RANDOM()), CURRENT_TIMESTAMP()) AS TXN_DATE,
-    ARRAY_CONSTRUCT('DEBIT','CREDIT','TRANSFER')
-        [UNIFORM(0,2,RANDOM())]::VARCHAR                 AS TXN_TYPE,
-    ROUND(UNIFORM(1, 50000, RANDOM()) / 10.0, 2)        AS AMOUNT,
-    ARRAY_CONSTRUCT('Amazon','Walmart','Starbucks','Shell Gas','Target',
-                    'Apple Store','Netflix','Uber','Delta Air','Costco',
-                    'Home Depot','Whole Foods','Chase Transfer','Wire Transfer','ATM')
-        [UNIFORM(0,14,RANDOM())]::VARCHAR                AS MERCHANT_NAME,
-    ARRAY_CONSTRUCT('GROCERIES','DINING','SHOPPING','FUEL','ENTERTAINMENT',
-                    'TRAVEL','TRANSFER','UTILITIES','HEALTHCARE','INVESTMENT')
-        [UNIFORM(0,9,RANDOM())]::VARCHAR                 AS CATEGORY,
-    ARRAY_CONSTRUCT('ONLINE','POS','MOBILE','ATM','BRANCH')
-        [UNIFORM(0,4,RANDOM())]::VARCHAR                 AS CHANNEL,
-    IFF(UNIFORM(1, 100, RANDOM()) <= 3, TRUE, FALSE)     AS IS_FLAGGED
-FROM TABLE(GENERATOR(ROWCOUNT => 10000));
+    ACCOUNT_ID,
+    TXN_DATE,
+    -- Transaction type based on category
+    CASE CATEGORY
+        WHEN 'TRANSFER' THEN 'TRANSFER'
+        ELSE CASE WHEN UNIFORM(0,5,RANDOM()) = 0 THEN 'CREDIT' ELSE 'DEBIT' END
+    END AS TXN_TYPE,
+    AMOUNT,
+    MERCHANT_NAME,
+    CATEGORY,
+    -- Channel correlated with merchant type
+    CASE
+        WHEN MERCHANT_NAME = 'ATM Withdrawal' THEN 'ATM'
+        WHEN MERCHANT_NAME IN ('Netflix','Fidelity') THEN 'ONLINE'
+        WHEN MERCHANT_NAME IN ('Uber','DoorDash') THEN 'MOBILE'
+        WHEN MERCHANT_NAME IN ('Shell','Costco','Whole Foods','CVS Pharmacy') THEN 'POS'
+        WHEN MERCHANT_NAME IN ('Amazon','Verizon','Delta Air Lines','Marriott')
+            THEN CASE WHEN CH_ROLL <= 3 THEN 'ONLINE' ELSE 'MOBILE' END
+        WHEN MERCHANT_NAME IN ('Chase Transfer','Wire Transfer')
+            THEN ARRAY_CONSTRUCT('ONLINE','MOBILE','BRANCH')[UNIFORM(0,2,RANDOM())]::VARCHAR
+        ELSE CASE CH_ROLL WHEN 0 THEN 'ONLINE' WHEN 1 THEN 'MOBILE' ELSE 'POS' END
+    END AS CHANNEL,
+    -- Higher amounts more likely flagged
+    CASE
+        WHEN AMOUNT > 2000 THEN IFF(UNIFORM(1, 100, RANDOM()) <= 10, TRUE, FALSE)
+        WHEN AMOUNT > 500  THEN IFF(UNIFORM(1, 100, RANDOM()) <= 5, TRUE, FALSE)
+        ELSE IFF(UNIFORM(1, 100, RANDOM()) <= 1, TRUE, FALSE)
+    END AS IS_FLAGGED
+FROM TXN_DETAIL;
 
 
 -- ============================================================

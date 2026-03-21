@@ -121,22 +121,45 @@ ORDER BY SCHEDULED_TIME DESC;
 
 
 -- ============================================================
--- 6. SNOWPIPE STATUS
+-- 6. CSV / S3 INGESTION STATUS
 -- ============================================================
 
-SELECT '>>> SNOWPIPE STATUS <<<' AS SECTION;
+SELECT '>>> S3 LANDING TABLE COUNTS <<<' AS SECTION;
 
-SHOW PIPES IN SCHEMA RAW;
-
-SELECT SYSTEM$PIPE_STATUS('RAW.PIPE_CUSTOMERS_S3')     AS CUSTOMERS_PIPE;
-SELECT SYSTEM$PIPE_STATUS('RAW.PIPE_TRANSACTIONS_S3')   AS TRANSACTIONS_PIPE;
-SELECT SYSTEM$PIPE_STATUS('RAW.PIPE_RISK_ASSESSMENTS_S3') AS RISK_PIPE;
+SELECT 'RAW.CUSTOMERS_S3'        AS TABLE_NAME, COUNT(*) AS ROW_COUNT FROM RAW.CUSTOMERS_S3
+UNION ALL SELECT 'RAW.TRANSACTIONS_S3',    COUNT(*) FROM RAW.TRANSACTIONS_S3
+UNION ALL SELECT 'RAW.RISK_ASSESSMENTS_S3', COUNT(*) FROM RAW.RISK_ASSESSMENTS_S3
+ORDER BY TABLE_NAME;
 
 
 -- ============================================================
--- 7. S3 INGESTION COPY HISTORY
+-- 7. S3 → BASE MERGE VALIDATION
 -- ============================================================
 
+SELECT '>>> S3 → BASE MERGE HEALTH <<<' AS SECTION;
+
+-- Customers: every S3 email should exist in BASE after MERGE
+SELECT 'Unmerged S3 customers (email not in BASE)' AS CHECK_NAME,
+       COUNT(*) AS ISSUE_COUNT
+FROM RAW.CUSTOMERS_S3 s
+LEFT JOIN BASE.CUSTOMERS b ON s.EMAIL = b.EMAIL
+WHERE b.EMAIL IS NULL;
+
+-- Transactions: S3 row count should be <= the increase in BASE
+SELECT 'S3 transaction rows loaded' AS CHECK_NAME,
+       COUNT(*) AS ROW_COUNT
+FROM RAW.TRANSACTIONS_S3;
+
+-- Risk assessments: every S3 (CUSTOMER_ID, ASSESSED_AT) pair should be in BASE
+SELECT 'Unmerged S3 risk assessments' AS CHECK_NAME,
+       COUNT(*) AS ISSUE_COUNT
+FROM RAW.RISK_ASSESSMENTS_S3 s
+LEFT JOIN BASE.RISK_ASSESSMENTS b
+    ON s.CUSTOMER_ID = b.CUSTOMER_ID
+   AND s.ASSESSED_AT = b.ASSESSED_AT
+WHERE b.ASSESSMENT_ID IS NULL;
+
+-- COPY INTO history for S3 landing tables (last 24h)
 SELECT '>>> COPY HISTORY (S3 tables) <<<' AS SECTION;
 
 SELECT
