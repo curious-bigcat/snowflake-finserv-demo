@@ -232,12 +232,10 @@ LIMIT 20;
 CREATE OR REPLACE FUNCTION RAW.PARSE_RISK_FACTORS(RISK_DATA VARIANT)
 RETURNS TABLE (
     RISK_SCORE       INT,
-    RISK_LEVEL       VARCHAR,
-    FACTOR           VARCHAR,
-    DEBT_TO_INCOME   FLOAT,
-    MISSED_PAYMENTS  INT,
-    CREDIT_AGE       INT,
-    AVG_BALANCE      FLOAT
+    CREDIT_HISTORY   VARCHAR,
+    FACTOR_NAME      VARCHAR,
+    FACTOR_SCORE     INT,
+    DEBT_TO_INCOME   FLOAT
 )
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
@@ -250,29 +248,27 @@ class RiskParser:
         if risk_data is None:
             return
         score = risk_data.get("risk_score")
-        level = risk_data.get("risk_level", "UNKNOWN")
+        credit_hist = risk_data.get("credit_history", "UNKNOWN")
         dti = risk_data.get("debt_to_income")
-        history = risk_data.get("credit_history", {}) or {}
-        missed = history.get("missed_payments")
-        age = history.get("credit_age_months")
-        avg_bal = history.get("avg_balance")
 
-        factors = risk_data.get("factors", []) or []
+        factors = risk_data.get("risk_factors", []) or []
         if not factors:
-            yield (score, level, "NONE", dti, missed, age, avg_bal)
+            yield (score, credit_hist, "NONE", None, dti)
         else:
             for factor in factors:
-                yield (score, level, str(factor), dti, missed, age, avg_bal)
+                fname = factor.get("factor", "UNKNOWN") if isinstance(factor, dict) else str(factor)
+                fscore = factor.get("score") if isinstance(factor, dict) else None
+                yield (score, credit_hist, fname, fscore, dti)
 $$;
 
 -- Use the UDTF
 SELECT
     r.CUSTOMER_ID,
-    r.ASSESSMENT_DATE,
+    r.ASSESSED_AT,
     parsed.*
 FROM BASE.RISK_ASSESSMENTS r,
 TABLE(RAW.PARSE_RISK_FACTORS(r.RISK_DATA)) parsed
-WHERE parsed.RISK_LEVEL IN ('HIGH', 'CRITICAL')
+WHERE parsed.CREDIT_HISTORY = 'POOR'
 ORDER BY parsed.RISK_SCORE DESC
 LIMIT 30;
 
@@ -301,14 +297,18 @@ def pipeline_summary(session):
         ("CURATED",     "DT_CUSTOMER_PROFILE",    "DYNAMIC TABLE"),
         ("CURATED",     "DT_TRANSACTION_ENRICHED","DYNAMIC TABLE"),
         ("CURATED",     "DT_SUPPORT_ENRICHED",    "DYNAMIC TABLE"),
-        ("CURATED",     "MV_MARKET_LATEST",       "MATERIALIZED VIEW"),
+        ("CURATED",     "DT_MARKET_LATEST",       "DYNAMIC TABLE"),
         ("CURATED",     "DT_RISK_FACTORS_PARSED", "DYNAMIC TABLE"),
+        ("CURATED",     "DT_COMPLIANCE_ENRICHED", "DYNAMIC TABLE"),
         ("CONSUMPTION", "DT_CUSTOMER_360",        "DYNAMIC TABLE"),
         ("CONSUMPTION", "DT_DAILY_FINANCIAL_METRICS", "DYNAMIC TABLE"),
         ("CONSUMPTION", "DT_RISK_DASHBOARD",      "DYNAMIC TABLE"),
         ("CONSUMPTION", "DT_CHANNEL_PERFORMANCE", "DYNAMIC TABLE"),
         ("CONSUMPTION", "DT_CHURN_FEATURES",      "DYNAMIC TABLE"),
         ("CONSUMPTION", "DT_MONTHLY_REVENUE",     "DYNAMIC TABLE"),
+        ("CONSUMPTION", "DT_MARKET_OVERVIEW",     "DYNAMIC TABLE"),
+        ("CONSUMPTION", "DT_COMPLIANCE_SUMMARY",  "DYNAMIC TABLE"),
+        ("CONSUMPTION", "DT_RISK_FACTOR_SUMMARY", "DYNAMIC TABLE"),
         ("CONSUMPTION", "CUSTOMER_RFM",           "TABLE (Python SP)"),
     ]
     results = []

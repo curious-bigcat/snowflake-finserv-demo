@@ -1,65 +1,37 @@
 /*=============================================================================
   FINSERV DEMO — Step 8: Tasks & DAG
-  Orchestrates stream-based processing from BASE → RAW → CONSUMPTION.
+  Event-driven task DAG for work that Dynamic Tables cannot handle:
+    - Flagged transaction alerting (stream → filter → alert table)
+    - High-priority ticket escalation (stream → filter → escalation table)
+    - Pipeline metrics snapshot (aggregate → daily metric row)
 
   DAG Structure:
   ┌───────────────────────────┐
   │  TASK_ROOT_SCHEDULER      │  (Root – every 5 min)
   └──────────┬────────────────┘
              │
-    ┌────────┴────────┐
-    ▼                 ▼
-  ┌──────────────┐ ┌───────────────────┐
-  │TASK_PROCESS  │ │TASK_PROCESS       │
-  │_TRANSACTIONS │ │_TICKETS           │
-  │(stream→raw)  │ │(stream→raw)       │
-  └──────┬───────┘ └────────┬──────────┘
-         │                  │
-         └────────┬─────────┘
-                  ▼
+     ┌───────┴────────┐
+     ▼                ▼
+  ┌────────────────┐ ┌─────────────────────┐
+  │TASK_DETECT     │ │TASK_ESCALATE        │
+  │_FLAGGED_TXN    │ │_TICKETS             │
+  │(stream→alerts) │ │(stream→escalations) │
+  └───────┬────────┘ └──────────┬──────────┘
+          │                     │
+          └─────────┬───────────┘
+                    ▼
   ┌──────────────────────────┐
   │ TASK_REFRESH_METRICS     │
-  │ (refresh consumption)    │
+  │ (BASE → PIPELINE_METRICS)│
   └──────────────────────────┘
 
-  NOTE: All tasks in RAW schema (AFTER predecessors must share schema).
+  NOTE: Dynamic Tables handle the curated/consumption pipeline automatically.
+        This DAG handles event-driven side effects only.
 =============================================================================*/
 
 USE ROLE ACCOUNTADMIN;
 USE WAREHOUSE FINSERV_WH;
 USE DATABASE FINSERV_DB;
-
--- ============================================================
--- Ensure target tables exist for stream processing
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS RAW.TRANSACTIONS_RAW (
-    TXN_ID         INT,
-    ACCOUNT_ID     INT,
-    TXN_DATE       TIMESTAMP_NTZ,
-    TXN_TYPE       VARCHAR(20),
-    AMOUNT         NUMBER(12,2),
-    MERCHANT_NAME  VARCHAR(100),
-    CATEGORY       VARCHAR(50),
-    CHANNEL        VARCHAR(20),
-    IS_FLAGGED     BOOLEAN,
-    LOADED_AT      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    STREAM_ACTION  VARCHAR(10)
-);
-
-CREATE TABLE IF NOT EXISTS RAW.SUPPORT_TICKETS_RAW (
-    TICKET_ID          INT,
-    CUSTOMER_ID        INT,
-    CREATED_AT         TIMESTAMP_NTZ,
-    SUBJECT            VARCHAR(200),
-    PRIORITY           VARCHAR(10),
-    BODY               TEXT,
-    RESOLUTION_STATUS  VARCHAR(20),
-    ASSIGNED_TO        VARCHAR(50),
-    LOADED_AT          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    STREAM_ACTION      VARCHAR(10)
-);
-
 
 -- ============================================================
 -- 1. ROOT TASK: Scheduler
@@ -68,70 +40,85 @@ CREATE TABLE IF NOT EXISTS RAW.SUPPORT_TICKETS_RAW (
 CREATE OR REPLACE TASK RAW.TASK_ROOT_SCHEDULER
     WAREHOUSE = FINSERV_WH
     SCHEDULE  = '5 MINUTE'
-    COMMENT   = 'Root task: triggers child stream processors every 5 minutes'
+    COMMENT   = 'Root task: triggers event-driven child tasks every 5 minutes'
 AS
     SELECT 1;
 
 
 -- ============================================================
--- 2. CHILD: Process Transactions Stream → RAW
+-- 2. CHILD: Detect Flagged Transactions → Alerts
+--    Reads new transactions from stream, filters for IS_FLAGGED,
+--    and writes to RAW.TRANSACTION_ALERTS.
 -- ============================================================
 
-CREATE OR REPLACE TASK RAW.TASK_PROCESS_TRANSACTIONS
+CREATE OR REPLACE TASK RAW.TASK_DETECT_FLAGGED_TXN
     WAREHOUSE = FINSERV_WH
     AFTER RAW.TASK_ROOT_SCHEDULER
     WHEN SYSTEM$STREAM_HAS_DATA('FINSERV_DB.RAW.TRANSACTIONS_STREAM')
 AS
-    INSERT INTO RAW.TRANSACTIONS_RAW (
-        TXN_ID, ACCOUNT_ID, TXN_DATE, TXN_TYPE, AMOUNT,
-        MERCHANT_NAME, CATEGORY, CHANNEL, IS_FLAGGED, STREAM_ACTION
+    INSERT INTO RAW.TRANSACTION_ALERTS (
+        TXN_ID, ACCOUNT_ID, TXN_DATE, AMOUNT,
+        MERCHANT_NAME, CATEGORY, CHANNEL, ALERT_REASON
     )
     SELECT
-        TXN_ID, ACCOUNT_ID, TXN_DATE, TXN_TYPE, AMOUNT,
-        MERCHANT_NAME, CATEGORY, CHANNEL, IS_FLAGGED,
-        METADATA$ACTION
-    FROM RAW.TRANSACTIONS_STREAM;
+        TXN_ID,
+        ACCOUNT_ID,
+        TXN_DATE,
+        AMOUNT,
+        MERCHANT_NAME,
+        CATEGORY,
+        CHANNEL,
+        CASE
+            WHEN AMOUNT > 5000 THEN 'HIGH_VALUE_FLAGGED'
+            WHEN MERCHANT_NAME ILIKE '%offshore%' THEN 'SUSPICIOUS_MERCHANT'
+            ELSE 'FLAGGED_TRANSACTION'
+        END AS ALERT_REASON
+    FROM RAW.TRANSACTIONS_STREAM
+    WHERE IS_FLAGGED = TRUE;
 
 
 -- ============================================================
--- 3. CHILD: Process Support Tickets Stream → RAW
+-- 3. CHILD: Escalate High-Priority Tickets
+--    Reads new/updated tickets from stream, filters for
+--    HIGH/URGENT priority that are still OPEN, writes to
+--    RAW.TICKET_ESCALATIONS.
 -- ============================================================
 
-CREATE OR REPLACE TASK RAW.TASK_PROCESS_TICKETS
+CREATE OR REPLACE TASK RAW.TASK_ESCALATE_TICKETS
     WAREHOUSE = FINSERV_WH
     AFTER RAW.TASK_ROOT_SCHEDULER
     WHEN SYSTEM$STREAM_HAS_DATA('FINSERV_DB.RAW.SUPPORT_TICKETS_STREAM')
 AS
-    MERGE INTO RAW.SUPPORT_TICKETS_RAW tgt
-    USING (
-        SELECT
-            TICKET_ID, CUSTOMER_ID, CREATED_AT, SUBJECT, PRIORITY,
-            BODY, RESOLUTION_STATUS, ASSIGNED_TO,
-            METADATA$ACTION AS STREAM_ACTION
-        FROM RAW.SUPPORT_TICKETS_STREAM
-    ) src
-    ON tgt.TICKET_ID = src.TICKET_ID
-    WHEN MATCHED THEN UPDATE SET
-        tgt.RESOLUTION_STATUS = src.RESOLUTION_STATUS,
-        tgt.ASSIGNED_TO       = src.ASSIGNED_TO,
-        tgt.LOADED_AT         = CURRENT_TIMESTAMP(),
-        tgt.STREAM_ACTION     = src.STREAM_ACTION
-    WHEN NOT MATCHED THEN INSERT (
-        TICKET_ID, CUSTOMER_ID, CREATED_AT, SUBJECT, PRIORITY,
-        BODY, RESOLUTION_STATUS, ASSIGNED_TO, STREAM_ACTION
-    ) VALUES (
-        src.TICKET_ID, src.CUSTOMER_ID, src.CREATED_AT, src.SUBJECT, src.PRIORITY,
-        src.BODY, src.RESOLUTION_STATUS, src.ASSIGNED_TO, src.STREAM_ACTION
-    );
+    INSERT INTO RAW.TICKET_ESCALATIONS (
+        TICKET_ID, CUSTOMER_ID, SUBJECT, PRIORITY,
+        RESOLUTION_STATUS, ASSIGNED_TO, ESCALATION_REASON
+    )
+    SELECT
+        TICKET_ID,
+        CUSTOMER_ID,
+        SUBJECT,
+        PRIORITY,
+        RESOLUTION_STATUS,
+        ASSIGNED_TO,
+        CASE
+            WHEN PRIORITY = 'URGENT' THEN 'URGENT_PRIORITY'
+            WHEN PRIORITY = 'HIGH' THEN 'HIGH_PRIORITY'
+            ELSE 'ESCALATION_REVIEW'
+        END AS ESCALATION_REASON
+    FROM RAW.SUPPORT_TICKETS_STREAM
+    WHERE PRIORITY IN ('HIGH', 'URGENT')
+      AND METADATA$ACTION = 'INSERT';
 
 
 -- ============================================================
--- 4. GRANDCHILD: Refresh Consumption Metrics
+-- 4. GRANDCHILD: Refresh Pipeline Metrics
+--    Aggregates current-state counts from BASE into a daily
+--    metrics snapshot in CONSUMPTION.PIPELINE_METRICS.
 -- ============================================================
 
 CREATE OR REPLACE TASK RAW.TASK_REFRESH_METRICS
     WAREHOUSE = FINSERV_WH
-    AFTER RAW.TASK_PROCESS_TRANSACTIONS, RAW.TASK_PROCESS_TICKETS
+    AFTER RAW.TASK_DETECT_FLAGGED_TXN, RAW.TASK_ESCALATE_TICKETS
 AS
     MERGE INTO CONSUMPTION.PIPELINE_METRICS tgt
     USING (
@@ -166,10 +153,10 @@ AS
 -- 5. ENABLE THE DAG (resume bottom-up)
 -- ============================================================
 
-ALTER TASK RAW.TASK_REFRESH_METRICS       RESUME;
-ALTER TASK RAW.TASK_PROCESS_TICKETS       RESUME;
-ALTER TASK RAW.TASK_PROCESS_TRANSACTIONS  RESUME;
-ALTER TASK RAW.TASK_ROOT_SCHEDULER        RESUME;
+ALTER TASK RAW.TASK_REFRESH_METRICS    RESUME;
+ALTER TASK RAW.TASK_ESCALATE_TICKETS   RESUME;
+ALTER TASK RAW.TASK_DETECT_FLAGGED_TXN RESUME;
+ALTER TASK RAW.TASK_ROOT_SCHEDULER     RESUME;
 
 
 -- ============================================================
@@ -204,3 +191,9 @@ FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
     RESULT_LIMIT => 20
 ))
 ORDER BY SCHEDULED_TIME DESC;
+
+-- Verify alert/escalation tables have data after initial run
+SELECT 'TRANSACTION_ALERTS'  AS TABLE_NAME, COUNT(*) AS ROW_COUNT FROM RAW.TRANSACTION_ALERTS
+UNION ALL
+SELECT 'TICKET_ESCALATIONS', COUNT(*) FROM RAW.TICKET_ESCALATIONS
+ORDER BY TABLE_NAME;

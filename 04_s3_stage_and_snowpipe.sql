@@ -13,6 +13,33 @@
     - S3 bucket with event notifications (SQS) configured for Snowpipe
     - IAM role with trust policy for Snowflake external ID
     - File 02 must be run first (BASE tables + CUSTOMERS/ACCOUNTS data)
+
+    {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ObjectLevelActions",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:GetObjectVersion",
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion"
+            ],
+            "Resource": "arn:aws:s3:::bsuresh-s3-finserv-integration/*"
+        },
+        {
+            "Sid": "BucketLevelActions",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "arn:aws:s3:::bsuresh-s3-finserv-integration"
+        }
+    ]
+}
 =============================================================================*/
 
 USE ROLE ACCOUNTADMIN;
@@ -31,14 +58,12 @@ USE SCHEMA RAW;
 CREATE STORAGE INTEGRATION IF NOT EXISTS S3_FINSERV_INTEGRATION
     TYPE                      = EXTERNAL_STAGE
     STORAGE_PROVIDER          = 'S3'
-    STORAGE_AWS_ROLE_ARN      = 'arn:aws:iam::123456789012:role/snowflake-finserv-role'
+    STORAGE_AWS_ROLE_ARN      = 'arn:aws:iam::484577546576:role/s3-finserv-role'
     ENABLED                   = TRUE
-    STORAGE_ALLOWED_LOCATIONS = ('s3://your-finserv-bucket/finserv-demo/');
+    STORAGE_ALLOWED_LOCATIONS = ('s3://bsuresh-s3-finserv-integration/');
 
 -- Retrieve the values needed for your IAM trust policy:
--- DESC STORAGE INTEGRATION S3_FINSERV_INTEGRATION;
-
-
+DESC STORAGE INTEGRATION S3_FINSERV_INTEGRATION;
 -- ============================================================
 -- 2. FILE FORMAT
 -- ============================================================
@@ -58,11 +83,11 @@ CREATE FILE FORMAT IF NOT EXISTS CSV_FORMAT
 
 CREATE STAGE IF NOT EXISTS S3_FINSERV_STAGE
     STORAGE_INTEGRATION = S3_FINSERV_INTEGRATION
-    URL                 = 's3://your-finserv-bucket/finserv-demo/'
+    URL                 = 's3://bsuresh-s3-finserv-integration/'
     FILE_FORMAT         = CSV_FORMAT
     COMMENT             = 'External S3 stage for Snowpipe auto-ingest';
 
-
+ls @S3_FINSERV_STAGE;
 -- ============================================================
 -- 4. LANDING TABLES
 -- ============================================================
@@ -79,7 +104,7 @@ CREATE TABLE IF NOT EXISTS TRANSACTIONS_S3 (
     CHANNEL         VARCHAR(15),
     IS_FLAGGED      BOOLEAN,
     _LOADED_AT      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    _SOURCE_FILE    VARCHAR(500)  DEFAULT METADATA$FILENAME
+    _SOURCE_FILE    VARCHAR(500)  DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS SUPPORT_TICKETS_S3 (
@@ -91,7 +116,7 @@ CREATE TABLE IF NOT EXISTS SUPPORT_TICKETS_S3 (
     RESOLUTION_STATUS  VARCHAR(20),
     ASSIGNED_TO        VARCHAR(50),
     _LOADED_AT         TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    _SOURCE_FILE       VARCHAR(500)  DEFAULT METADATA$FILENAME
+    _SOURCE_FILE       VARCHAR(500)  DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS RISK_ASSESSMENTS_S3 (
@@ -99,7 +124,7 @@ CREATE TABLE IF NOT EXISTS RISK_ASSESSMENTS_S3 (
     ASSESSED_AT     TIMESTAMP_NTZ,
     RISK_DATA_RAW   VARCHAR(16777216),
     _LOADED_AT      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    _SOURCE_FILE    VARCHAR(500)  DEFAULT METADATA$FILENAME
+    _SOURCE_FILE    VARCHAR(500)  DEFAULT NULL
 );
 
 -- Parsed view for risk assessments (converts raw JSON string → VARIANT)

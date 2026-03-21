@@ -75,19 +75,17 @@ LIMIT 20;
 SELECT
     r.CUSTOMER_ID,
     c.FIRST_NAME || ' ' || c.LAST_NAME AS CUSTOMER_NAME,
-    r.ASSESSMENT_DATE,
-    r.RISK_DATA:risk_score::INT        AS RISK_SCORE,
-    r.RISK_DATA:risk_level::VARCHAR    AS RISK_LEVEL,
-    f.INDEX                            AS FACTOR_INDEX,
-    f.VALUE::VARCHAR                   AS RISK_FACTOR,
-    -- Credit history nested access
-    r.RISK_DATA:credit_history.missed_payments::INT AS MISSED_PAYMENTS,
-    r.RISK_DATA:credit_history.credit_age_months::INT AS CREDIT_AGE_MONTHS,
-    r.RISK_DATA:debt_to_income::FLOAT  AS DEBT_TO_INCOME
-FROM BASE.RISK_ASSESSMENTS r,
-     LATERAL FLATTEN(INPUT => r.RISK_DATA:factors) f
-JOIN BASE.CUSTOMERS c ON r.CUSTOMER_ID = c.CUSTOMER_ID
-WHERE r.RISK_DATA:risk_level::VARCHAR IN ('HIGH', 'CRITICAL')
+    r.ASSESSED_AT,
+    r.RISK_DATA:risk_score::INT          AS RISK_SCORE,
+    r.RISK_DATA:credit_history::VARCHAR  AS CREDIT_HISTORY,
+    f.INDEX                              AS FACTOR_INDEX,
+    f.VALUE:factor::VARCHAR              AS RISK_FACTOR,
+    f.VALUE:score::INT                   AS FACTOR_SCORE,
+    r.RISK_DATA:debt_to_income::FLOAT    AS DEBT_TO_INCOME
+FROM BASE.RISK_ASSESSMENTS r
+JOIN BASE.CUSTOMERS c ON r.CUSTOMER_ID = c.CUSTOMER_ID,
+     LATERAL FLATTEN(INPUT => r.RISK_DATA:risk_factors) f
+WHERE r.RISK_DATA:credit_history::VARCHAR = 'POOR'
 ORDER BY RISK_SCORE DESC
 LIMIT 30;
 

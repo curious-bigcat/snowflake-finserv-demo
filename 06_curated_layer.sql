@@ -39,9 +39,9 @@ SELECT
     COALESCE(SUM(a.CREDIT_LIMIT), 0)                              AS TOTAL_CREDIT_LIMIT,
     -- Latest risk assessment
     MAX(r.RISK_DATA:risk_score::INT)                              AS LATEST_RISK_SCORE,
-    MAX(r.RISK_DATA:risk_level::VARCHAR)                          AS LATEST_RISK_LEVEL,
+    MAX(r.RISK_DATA:credit_history::VARCHAR)                      AS LATEST_CREDIT_HISTORY,
     MAX(r.RISK_DATA:debt_to_income::FLOAT)                        AS DEBT_TO_INCOME,
-    MAX(r.ASSESSMENT_DATE)                                        AS LAST_ASSESSMENT_DATE
+    MAX(r.ASSESSED_AT)                                            AS LAST_ASSESSMENT_DATE
 FROM BASE.CUSTOMERS c
 LEFT JOIN BASE.ACCOUNTS a
     ON c.CUSTOMER_ID = a.CUSTOMER_ID
@@ -49,13 +49,13 @@ LEFT JOIN (
     -- Get latest risk assessment per customer
     SELECT *
     FROM BASE.RISK_ASSESSMENTS
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY CUSTOMER_ID ORDER BY ASSESSMENT_DATE DESC) = 1
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY CUSTOMER_ID ORDER BY ASSESSED_AT DESC) = 1
 ) r ON c.CUSTOMER_ID = r.CUSTOMER_ID
 GROUP BY
     c.CUSTOMER_ID, c.FIRST_NAME, c.LAST_NAME, c.EMAIL, c.PHONE,
     c.DATE_OF_BIRTH, c.CITY, c.STATE, c.COUNTRY, c.ANNUAL_INCOME,
     c.EMPLOYMENT_STATUS, c.CREDIT_SCORE, c.SIGNUP_DATE,
-    r.RISK_DATA, r.ASSESSMENT_DATE;
+    r.RISK_DATA, r.ASSESSED_AT;
 
 
 -- ============================================================
@@ -130,11 +130,13 @@ LEFT JOIN BASE.CUSTOMERS c ON st.CUSTOMER_ID = c.CUSTOMER_ID;
 
 
 -- ============================================================
--- 4. MV_MARKET_LATEST
---    Materialized view: latest market data per ticker.
+-- 4. DT_MARKET_LATEST
+--    Latest market data per ticker (dynamic table).
 -- ============================================================
 
-CREATE OR REPLACE MATERIALIZED VIEW CURATED.MV_MARKET_LATEST
+CREATE OR REPLACE DYNAMIC TABLE CURATED.DT_MARKET_LATEST
+    TARGET_LAG = '1 MINUTE'
+    WAREHOUSE = FINSERV_WH
     COMMENT = 'Latest market data per ticker symbol'
 AS
 SELECT
@@ -145,15 +147,11 @@ SELECT
     m.MARKET_DATA:low::FLOAT            AS LOW_PRICE,
     m.MARKET_DATA:close::FLOAT          AS CLOSE_PRICE,
     m.MARKET_DATA:volume::INT           AS VOLUME,
-    m.MARKET_DATA:indicators.sma_20::FLOAT       AS SMA_20,
+    m.MARKET_DATA:indicators.moving_avg_50::FLOAT AS MOVING_AVG_50,
     m.MARKET_DATA:indicators.rsi::FLOAT          AS RSI,
-    m.MARKET_DATA:indicators.macd::FLOAT         AS MACD,
-    m.MARKET_DATA:indicators.bollinger_upper::FLOAT  AS BOLLINGER_UPPER,
-    m.MARKET_DATA:indicators.bollinger_lower::FLOAT  AS BOLLINGER_LOWER
+    m.MARKET_DATA:indicators.macd::FLOAT         AS MACD
 FROM BASE.MARKET_DATA m
-WHERE m.TRADE_DATE = (
-    SELECT MAX(TRADE_DATE) FROM BASE.MARKET_DATA m2 WHERE m2.TICKER = m.TICKER
-);
+QUALIFY ROW_NUMBER() OVER (PARTITION BY m.TICKER ORDER BY m.TRADE_DATE DESC) = 1;
 
 
 -- ============================================================
@@ -169,16 +167,16 @@ AS
 SELECT
     r.ASSESSMENT_ID,
     r.CUSTOMER_ID,
-    r.ASSESSMENT_DATE,
+    r.ASSESSED_AT,
     r.RISK_DATA:risk_score::INT                     AS RISK_SCORE,
-    r.RISK_DATA:risk_level::VARCHAR                 AS RISK_LEVEL,
+    r.RISK_DATA:credit_history::VARCHAR             AS CREDIT_HISTORY,
     r.RISK_DATA:debt_to_income::FLOAT               AS DEBT_TO_INCOME,
-    r.RISK_DATA:credit_history.avg_balance::FLOAT    AS HIST_AVG_BALANCE,
-    r.RISK_DATA:credit_history.missed_payments::INT  AS MISSED_PAYMENTS,
-    r.RISK_DATA:credit_history.credit_age_months::INT AS CREDIT_AGE_MONTHS,
-    f.VALUE::VARCHAR                                 AS RISK_FACTOR
+    r.RISK_DATA:assessment_type::VARCHAR             AS ASSESSMENT_TYPE,
+    r.RISK_DATA:model_version::VARCHAR               AS MODEL_VERSION,
+    f.VALUE:factor::VARCHAR                          AS RISK_FACTOR,
+    f.VALUE:score::INT                               AS FACTOR_SCORE
 FROM BASE.RISK_ASSESSMENTS r,
-     LATERAL FLATTEN(INPUT => r.RISK_DATA:factors, OUTER => TRUE) f;
+     LATERAL FLATTEN(INPUT => r.RISK_DATA:risk_factors, OUTER => TRUE) f;
 
 
 -- ============================================================
@@ -216,7 +214,7 @@ SELECT 'DT_TRANSACTION_ENRICHED', COUNT(*) FROM CURATED.DT_TRANSACTION_ENRICHED
 UNION ALL
 SELECT 'DT_SUPPORT_ENRICHED',     COUNT(*) FROM CURATED.DT_SUPPORT_ENRICHED
 UNION ALL
-SELECT 'MV_MARKET_LATEST',        COUNT(*) FROM CURATED.MV_MARKET_LATEST
+SELECT 'DT_MARKET_LATEST',         COUNT(*) FROM CURATED.DT_MARKET_LATEST
 UNION ALL
 SELECT 'DT_RISK_FACTORS_PARSED',  COUNT(*) FROM CURATED.DT_RISK_FACTORS_PARSED
 UNION ALL

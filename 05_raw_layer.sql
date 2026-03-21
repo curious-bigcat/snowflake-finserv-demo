@@ -1,6 +1,13 @@
 /*=============================================================================
-  FINSERV DEMO — Step 5: Raw Layer (Streams + Staging)
-  Creates streams on BASE tables for CDC and staging tables in the RAW schema.
+  FINSERV DEMO — Step 5: Raw Layer (Streams + Event Tables)
+  Creates streams on the two most active BASE tables for event-driven
+  processing via the task DAG (file 08).
+
+  Architecture note:
+    - Dynamic Tables (files 06-07) auto-refresh from BASE directly.
+    - Streams + Tasks handle event-driven work that DTs cannot do:
+      flagged-transaction alerting and high-priority ticket escalation.
+    - No redundant staging copies of BASE data.
 =============================================================================*/
 
 USE ROLE ACCOUNTADMIN;
@@ -9,110 +16,58 @@ USE DATABASE FINSERV_DB;
 
 -- ============================================================
 -- 1. STREAMS ON BASE TABLES
+--    Only on tables where event-driven processing adds value.
 -- ============================================================
 
--- Customer stream — captures new signups and profile updates
-CREATE OR REPLACE STREAM RAW.CUSTOMERS_STREAM
-    ON TABLE BASE.CUSTOMERS
-    APPEND_ONLY = FALSE
-    SHOW_INITIAL_ROWS = TRUE
-    COMMENT = 'CDC stream on base customers table';
-
--- Accounts stream — captures new accounts and status changes
-CREATE OR REPLACE STREAM RAW.ACCOUNTS_STREAM
-    ON TABLE BASE.ACCOUNTS
-    APPEND_ONLY = FALSE
-    SHOW_INITIAL_ROWS = TRUE
-    COMMENT = 'CDC stream on base accounts table';
-
--- Transactions stream — append-only (transactions are immutable)
+-- Transactions stream — detect flagged/suspicious transactions in real time
 CREATE OR REPLACE STREAM RAW.TRANSACTIONS_STREAM
     ON TABLE BASE.TRANSACTIONS
     APPEND_ONLY = TRUE
     SHOW_INITIAL_ROWS = TRUE
-    COMMENT = 'Append-only stream on base transactions table';
+    COMMENT = 'Append-only stream for flagged transaction alerting';
 
--- Risk assessments stream — captures new and updated assessments
-CREATE OR REPLACE STREAM RAW.RISK_ASSESSMENTS_STREAM
-    ON TABLE BASE.RISK_ASSESSMENTS
-    APPEND_ONLY = FALSE
-    SHOW_INITIAL_ROWS = TRUE
-    COMMENT = 'CDC stream on base risk assessments';
-
--- Market data stream — append-only (market data is immutable)
-CREATE OR REPLACE STREAM RAW.MARKET_DATA_STREAM
-    ON TABLE BASE.MARKET_DATA
-    APPEND_ONLY = TRUE
-    SHOW_INITIAL_ROWS = TRUE
-    COMMENT = 'Append-only stream on base market data';
-
--- Support tickets stream
+-- Support tickets stream — detect high-priority tickets for escalation
 CREATE OR REPLACE STREAM RAW.SUPPORT_TICKETS_STREAM
     ON TABLE BASE.SUPPORT_TICKETS
     APPEND_ONLY = FALSE
     SHOW_INITIAL_ROWS = TRUE
-    COMMENT = 'CDC stream on base support tickets';
-
--- Compliance documents stream
-CREATE OR REPLACE STREAM RAW.COMPLIANCE_DOCS_STREAM
-    ON TABLE BASE.COMPLIANCE_DOCUMENTS
-    APPEND_ONLY = FALSE
-    SHOW_INITIAL_ROWS = TRUE
-    COMMENT = 'CDC stream on base compliance documents';
+    COMMENT = 'CDC stream for high-priority ticket escalation';
 
 
 -- ============================================================
--- 2. RAW STAGING TABLES
---    Mirror BASE structure with audit columns.
---    Fed by streams via the task DAG (see 08_tasks_and_dag.sql).
+-- 2. EVENT TABLES
+--    Non-redundant tables that capture derived events,
+--    not copies of source data.
 -- ============================================================
 
--- Customers staging (for stream-based processing)
-CREATE OR REPLACE TABLE RAW.CUSTOMERS_RAW (
-    CUSTOMER_ID       INT,
-    FIRST_NAME        VARCHAR(50),
-    LAST_NAME         VARCHAR(50),
-    EMAIL             VARCHAR(100),
-    PHONE             VARCHAR(20),
-    DATE_OF_BIRTH     DATE,
-    CITY              VARCHAR(50),
-    STATE             VARCHAR(50),
-    COUNTRY           VARCHAR(50),
-    ANNUAL_INCOME     NUMBER(12,2),
-    EMPLOYMENT_STATUS VARCHAR(20),
-    CREDIT_SCORE      INT,
-    SIGNUP_DATE       TIMESTAMP_NTZ,
-    LOADED_AT         TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    STREAM_ACTION     VARCHAR(10)
+-- Flagged transaction alerts — populated by TASK_DETECT_FLAGGED_TXN
+CREATE OR REPLACE TABLE RAW.TRANSACTION_ALERTS (
+    ALERT_ID          NUMBER AUTOINCREMENT START 1 INCREMENT 1,
+    TXN_ID            INT NOT NULL,
+    ACCOUNT_ID        INT NOT NULL,
+    TXN_DATE          TIMESTAMP_NTZ,
+    AMOUNT            NUMBER(12,2),
+    MERCHANT_NAME     VARCHAR(100),
+    CATEGORY          VARCHAR(50),
+    CHANNEL           VARCHAR(20),
+    ALERT_REASON      VARCHAR(50),
+    DETECTED_AT       TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    REVIEWED          BOOLEAN DEFAULT FALSE,
+    CONSTRAINT PK_ALERTS PRIMARY KEY (ALERT_ID)
 );
 
--- Transactions staging (for stream-based processing)
-CREATE OR REPLACE TABLE RAW.TRANSACTIONS_RAW (
-    TXN_ID         INT,
-    ACCOUNT_ID     INT,
-    TXN_DATE       TIMESTAMP_NTZ,
-    TXN_TYPE       VARCHAR(20),
-    AMOUNT         NUMBER(12,2),
-    MERCHANT_NAME  VARCHAR(100),
-    CATEGORY       VARCHAR(50),
-    CHANNEL        VARCHAR(20),
-    IS_FLAGGED     BOOLEAN,
-    LOADED_AT      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    STREAM_ACTION  VARCHAR(10)
-);
-
--- Support tickets staging
-CREATE OR REPLACE TABLE RAW.SUPPORT_TICKETS_RAW (
-    TICKET_ID          INT,
-    CUSTOMER_ID        INT,
-    CREATED_AT         TIMESTAMP_NTZ,
-    SUBJECT            VARCHAR(200),
-    PRIORITY           VARCHAR(10),
-    BODY               TEXT,
-    RESOLUTION_STATUS  VARCHAR(20),
-    ASSIGNED_TO        VARCHAR(50),
-    LOADED_AT          TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    STREAM_ACTION      VARCHAR(10)
+-- High-priority ticket escalations — populated by TASK_ESCALATE_TICKETS
+CREATE OR REPLACE TABLE RAW.TICKET_ESCALATIONS (
+    ESCALATION_ID     NUMBER AUTOINCREMENT START 1 INCREMENT 1,
+    TICKET_ID         INT NOT NULL,
+    CUSTOMER_ID       INT NOT NULL,
+    SUBJECT           VARCHAR(200),
+    PRIORITY          VARCHAR(10),
+    RESOLUTION_STATUS VARCHAR(20),
+    ASSIGNED_TO       VARCHAR(50),
+    ESCALATED_AT      TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    ESCALATION_REASON VARCHAR(100),
+    CONSTRAINT PK_ESCALATIONS PRIMARY KEY (ESCALATION_ID)
 );
 
 
@@ -120,14 +75,12 @@ CREATE OR REPLACE TABLE RAW.SUPPORT_TICKETS_RAW (
 -- 3. VERIFICATION
 -- ============================================================
 
--- List all streams
 SHOW STREAMS IN SCHEMA RAW;
 
--- Check stream status
-SELECT SYSTEM$STREAM_HAS_DATA('RAW.CUSTOMERS_STREAM')        AS CUSTOMERS_HAS_DATA;
-SELECT SYSTEM$STREAM_HAS_DATA('RAW.ACCOUNTS_STREAM')          AS ACCOUNTS_HAS_DATA;
-SELECT SYSTEM$STREAM_HAS_DATA('RAW.TRANSACTIONS_STREAM')      AS TRANSACTIONS_HAS_DATA;
-SELECT SYSTEM$STREAM_HAS_DATA('RAW.RISK_ASSESSMENTS_STREAM')  AS RISK_HAS_DATA;
-SELECT SYSTEM$STREAM_HAS_DATA('RAW.MARKET_DATA_STREAM')       AS MARKET_HAS_DATA;
-SELECT SYSTEM$STREAM_HAS_DATA('RAW.SUPPORT_TICKETS_STREAM')   AS TICKETS_HAS_DATA;
-SELECT SYSTEM$STREAM_HAS_DATA('RAW.COMPLIANCE_DOCS_STREAM')   AS COMPLIANCE_HAS_DATA;
+SELECT SYSTEM$STREAM_HAS_DATA('RAW.TRANSACTIONS_STREAM')     AS TRANSACTIONS_HAS_DATA;
+SELECT SYSTEM$STREAM_HAS_DATA('RAW.SUPPORT_TICKETS_STREAM')  AS TICKETS_HAS_DATA;
+
+SELECT 'RAW.TRANSACTION_ALERTS'   AS TABLE_NAME, COUNT(*) AS ROW_COUNT FROM RAW.TRANSACTION_ALERTS
+UNION ALL
+SELECT 'RAW.TICKET_ESCALATIONS',  COUNT(*) FROM RAW.TICKET_ESCALATIONS
+ORDER BY TABLE_NAME;

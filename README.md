@@ -94,10 +94,10 @@ streamlit run 15_streamlit_dashboard.py
 
 | # | File | What It Does | Objects Created |
 |---|------|-------------|-----------------|
-| 05 | `05_raw_layer.sql` | Creates 7 CDC streams on base tables + 3 staging tables | 7 streams (e.g., `CUSTOMERS_STREAM`), `CUSTOMERS_RAW`, `TRANSACTIONS_RAW`, `SUPPORT_TICKETS_RAW` |
-| 06 | `06_curated_layer.sql` | Builds curated dynamic tables and a materialized view | `DT_CUSTOMER_PROFILE`, `DT_TRANSACTION_ENRICHED`, `DT_SUPPORT_ENRICHED`, `MV_MARKET_LATEST`, `DT_RISK_FACTORS_PARSED` |
-| 07 | `07_consumption_layer.sql` | Builds consumption-layer analytics tables | `DT_CUSTOMER_360`, `DT_DAILY_FINANCIAL_METRICS`, `DT_RISK_DASHBOARD`, `DT_CHANNEL_PERFORMANCE`, `DT_CHURN_FEATURES`, `DT_MONTHLY_REVENUE` |
-| 08 | `08_tasks_and_dag.sql` | Creates a 4-task DAG for stream processing | `TASK_ROOT_SCHEDULER` → `TASK_PROCESS_TRANSACTIONS` + `TASK_PROCESS_TICKETS` → `TASK_REFRESH_METRICS` |
+| 05 | `05_raw_layer.sql` | Creates 2 CDC streams + 2 event tables for alerting/escalation | `TRANSACTIONS_STREAM`, `SUPPORT_TICKETS_STREAM`, `TRANSACTION_ALERTS`, `TICKET_ESCALATIONS` |
+| 06 | `06_curated_layer.sql` | Builds curated dynamic tables | `DT_CUSTOMER_PROFILE`, `DT_TRANSACTION_ENRICHED`, `DT_SUPPORT_ENRICHED`, `DT_MARKET_LATEST`, `DT_RISK_FACTORS_PARSED`, `DT_COMPLIANCE_ENRICHED` |
+| 07 | `07_consumption_layer.sql` | Builds consumption-layer analytics tables | `DT_CUSTOMER_360`, `DT_DAILY_FINANCIAL_METRICS`, `DT_RISK_DASHBOARD`, `DT_CHANNEL_PERFORMANCE`, `DT_CHURN_FEATURES`, `DT_MONTHLY_REVENUE`, `DT_MARKET_OVERVIEW`, `DT_COMPLIANCE_SUMMARY`, `DT_RISK_FACTOR_SUMMARY` |
+| 08 | `08_tasks_and_dag.sql` | Creates a 4-task DAG for event-driven alerting | `TASK_ROOT_SCHEDULER` → `TASK_DETECT_FLAGGED_TXN` + `TASK_ESCALATE_TICKETS` → `TASK_REFRESH_METRICS` |
 
 ### Phase 4: Advanced SQL & Snowpark (Files 09-11)
 
@@ -257,26 +257,38 @@ A sequential curriculum for learning Snowflake features using this project. Foll
 | CURATED | DT_CUSTOMER_PROFILE | 1 minute | FULL | 2,000 |
 | CURATED | DT_TRANSACTION_ENRICHED | 1 minute | FULL | 10,000 |
 | CURATED | DT_SUPPORT_ENRICHED | 1 minute | FULL | 1,000 |
+| CURATED | DT_MARKET_LATEST | 1 minute | FULL | ~50 |
 | CURATED | DT_RISK_FACTORS_PARSED | 1 minute | INCREMENTAL | 6,000 |
+| CURATED | DT_COMPLIANCE_ENRICHED | 1 minute | FULL | 200 |
 | CONSUMPTION | DT_CUSTOMER_360 | DOWNSTREAM | FULL | 2,000 |
 | CONSUMPTION | DT_DAILY_FINANCIAL_METRICS | DOWNSTREAM | FULL | 181 |
 | CONSUMPTION | DT_RISK_DASHBOARD | DOWNSTREAM | FULL | 1,273 |
 | CONSUMPTION | DT_CHANNEL_PERFORMANCE | DOWNSTREAM | FULL | 905 |
 | CONSUMPTION | DT_CHURN_FEATURES | 5 minutes | FULL | 2,000 |
 | CONSUMPTION | DT_MONTHLY_REVENUE | 5 minutes | FULL | 7 |
+| CONSUMPTION | DT_MARKET_OVERVIEW | DOWNSTREAM | FULL | ~50 |
+| CONSUMPTION | DT_COMPLIANCE_SUMMARY | DOWNSTREAM | FULL | ~10 |
+| CONSUMPTION | DT_RISK_FACTOR_SUMMARY | DOWNSTREAM | FULL | ~20 |
 
 ### Streams (RAW)
 
-CUSTOMERS_STREAM, ACCOUNTS_STREAM, TRANSACTIONS_STREAM, RISK_ASSESSMENTS_STREAM, MARKET_DATA_STREAM, SUPPORT_TICKETS_STREAM, COMPLIANCE_DOCS_STREAM
+TRANSACTIONS_STREAM, SUPPORT_TICKETS_STREAM
+
+### Event Tables (RAW)
+
+| Table | Purpose |
+|-------|---------|
+| TRANSACTION_ALERTS | Flagged transactions detected by stream-driven task |
+| TICKET_ESCALATIONS | High/urgent tickets escalated by stream-driven task |
 
 ### Tasks (RAW)
 
 | Task | Schedule | Predecessors |
 |------|----------|-------------|
 | TASK_ROOT_SCHEDULER | 5 MINUTE | — |
-| TASK_PROCESS_TRANSACTIONS | — | TASK_ROOT_SCHEDULER |
-| TASK_PROCESS_TICKETS | — | TASK_ROOT_SCHEDULER |
-| TASK_REFRESH_METRICS | — | TASK_PROCESS_TRANSACTIONS, TASK_PROCESS_TICKETS |
+| TASK_DETECT_FLAGGED_TXN | — | TASK_ROOT_SCHEDULER |
+| TASK_ESCALATE_TICKETS | — | TASK_ROOT_SCHEDULER |
+| TASK_REFRESH_METRICS | — | TASK_DETECT_FLAGGED_TXN, TASK_ESCALATE_TICKETS |
 
 ### Cortex AI Services
 
