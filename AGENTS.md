@@ -107,7 +107,8 @@ to enable targeted error handling.
 - Verify: `SHOW CORTEX SEARCH SERVICES IN SCHEMA CONSUMPTION` returns 2 services, both ACTIVE
 
 **File 14 — `14_managed_mcp_server.sql`** (Snowflake-managed MCP)
-- Creates: `FINSERV_MCP_SERVER` with 6 tools (2 Search, 1 SQL, 2 UDF, 1 SP)
+- **Prerequisite**: Create `FINSERV_AGENT` Cortex Agent via Snowsight UI first, with Cortex Analyst (semantic model) and Cortex Search (support tickets, compliance docs) tools
+- Creates: `FINSERV_MCP_SERVER` with 1 tool — the Cortex Agent that internally routes to analyst/search
 - Verify: `SHOW MCP SERVERS IN SCHEMA CONSUMPTION` and `DESCRIBE MCP SERVER CONSUMPTION.FINSERV_MCP_SERVER`
 - Note: `14_mcp_server.py` is the legacy custom Python MCP — use the SQL version instead
 
@@ -196,7 +197,7 @@ After full deployment, verify:
 - [ ] 4-task DAG all in `started` state
 - [ ] 6 Snowpark Python objects callable (2 SPs, 2 UDFs, 1 UDTF, 1 SP-TABLE)
 - [ ] 2 Cortex Search services in ACTIVE state
-- [ ] 1 MCP server with 6 tools
+- [ ] 1 MCP server with 1 Cortex Agent tool (finserv_agent)
 - [ ] SP_PIPELINE_SUMMARY returns 21 rows with all ROW_COUNT > 0
 - [ ] All 5 data quality checks return ISSUE_COUNT = 0
 - [ ] Incremental test: new customers visible in DT_CUSTOMER_360
