@@ -28,7 +28,7 @@ $$
 tools:
 
   - name: "finserv_agent"
-    type: "CORTEX_AGENT"
+    type: "CORTEX_AGENT_RUN"
     identifier: "FINSERV_DB.CONSUMPTION.FINSERV_AGENT"
     title: "FinServ AI Agent"
     description: >
