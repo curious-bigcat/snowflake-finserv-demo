@@ -1,22 +1,31 @@
 """
-FINSERV DEMO — Step 03: CSV Generator
-Generates realistic financial services data as CSV files for Snowflake ingestion
-via internal stage + COPY INTO (see 04_s3_stage_and_snowpipe.sql).
+FINSERV DEMO — Step 03: CSV Generator & S3 Upload
+Generates realistic CSV data for 3 tables (TRANSACTIONS, SUPPORT_TICKETS,
+RISK_ASSESSMENTS) and uploads to S3 for Snowpipe auto-ingest.
+
+These tables are NOT populated by SQL INSERT in file 02.
+Instead, data flows: CSV → S3 → Snowpipe → landing tables → MERGE into BASE.
 
 Usage:
-    pip install faker
+    pip install faker boto3
+    # Upload to S3 (requires AWS credentials):
     python3 03_csv_generator_and_s3_upload.py
+    # Local-only mode (no S3, writes to ./csv_output/):
+    python3 03_csv_generator_and_s3_upload.py --local
 
-Output:
-    ./csv_output/customers.csv
-    ./csv_output/transactions.csv
-    ./csv_output/risk_assessments.csv
+Environment variables:
+    S3_BUCKET   — S3 bucket name (default: your-finserv-bucket)
+    S3_PREFIX   — S3 key prefix (default: finserv-demo/)
+    AWS_PROFILE — AWS CLI profile (default: default)
+    OUTPUT_DIR  — Local output directory (default: ./csv_output)
 """
 
+import argparse
 import csv
 import json
 import os
 import random
+import sys
 from datetime import datetime, timedelta
 
 from faker import Faker
@@ -27,9 +36,12 @@ from faker import Faker
 
 CONFIG = {
     "output_dir": os.environ.get("OUTPUT_DIR", "./csv_output"),
-    "customers_count": 500,
-    "transactions_count": 5000,
-    "risk_assessments_count": 500,
+    "s3_bucket": os.environ.get("S3_BUCKET", "your-finserv-bucket"),
+    "s3_prefix": os.environ.get("S3_PREFIX", "finserv-demo/"),
+    "aws_profile": os.environ.get("AWS_PROFILE", "default"),
+    "transactions_count": 10000,
+    "support_tickets_count": 1000,
+    "risk_assessments_count": 2000,
     "seed": 42,
 }
 
@@ -42,20 +54,6 @@ random.seed(CONFIG["seed"])
 # ---------------------------------------------------------------------------
 # REFERENCE DATA — correlated merchants, categories, and amounts
 # ---------------------------------------------------------------------------
-
-LOCATIONS = [
-    ("New York", "NY", "USA"),        ("Los Angeles", "CA", "USA"),
-    ("Chicago", "IL", "USA"),         ("Houston", "TX", "USA"),
-    ("Miami", "FL", "USA"),           ("London", "England", "UK"),
-    ("Manchester", "England", "UK"),  ("Singapore", "Central", "Singapore"),
-    ("Tokyo", "Kanto", "Japan"),      ("Sydney", "NSW", "Australia"),
-    ("Melbourne", "VIC", "Australia"),("Toronto", "ON", "Canada"),
-    ("Vancouver", "BC", "Canada"),    ("Mumbai", "MH", "India"),
-    ("Dubai", "Dubai", "UAE"),        ("Sao Paulo", "SP", "Brazil"),
-    ("Berlin", "Berlin", "Germany"),  ("Frankfurt", "Hessen", "Germany"),
-    ("Paris", "IDF", "France"),       ("Zurich", "ZH", "Switzerland"),
-    ("Hong Kong", "HK", "Hong Kong"), ("Seoul", "Seoul", "South Korea"),
-]
 
 # Merchant -> (category, typical_amount_range, common_channels)
 MERCHANT_PROFILES = {
@@ -94,133 +92,46 @@ MERCHANT_PROFILES = {
 
 MERCHANT_NAMES = list(MERCHANT_PROFILES.keys())
 
-# Employment status weights (realistic distribution)
-EMPLOYMENT_WEIGHTS = {
-    "EMPLOYED": 0.55, "SELF_EMPLOYED": 0.15, "RETIRED": 0.15,
-    "STUDENT": 0.08, "UNEMPLOYED": 0.07,
-}
-
-# Income ranges by employment status (min, mode, max) for triangular distribution
-INCOME_BY_EMPLOYMENT = {
-    "EMPLOYED":      (30000, 75000, 350000),
-    "SELF_EMPLOYED": (20000, 85000, 500000),
-    "RETIRED":       (25000, 55000, 250000),
-    "STUDENT":       (5000, 18000, 45000),
-    "UNEMPLOYED":    (0, 12000, 35000),
-}
-
-# Email domain weights
-EMAIL_DOMAINS = [
-    ("gmail.com", 0.40), ("yahoo.com", 0.15), ("outlook.com", 0.12),
-    ("icloud.com", 0.08), ("hotmail.com", 0.07), ("protonmail.com", 0.05),
-    ("aol.com", 0.03), ("mail.com", 0.03), ("zoho.com", 0.02),
-    ("fastmail.com", 0.02), ("hey.com", 0.01), ("gmx.com", 0.02),
+# Support ticket reference data
+TICKET_SUBJECTS = [
+    "Account access issue",
+    "Unauthorized transaction reported",
+    "Request for credit limit increase",
+    "Mobile app not loading",
+    "Wire transfer delay",
+    "Incorrect balance displayed",
+    "Card declined at merchant",
+    "Interest rate dispute",
+    "Lost debit card",
+    "Duplicate charge on statement",
+    "Account closure request",
+    "PIN reset needed",
+    "Foreign transaction fee inquiry",
+    "Direct deposit not received",
+    "Fraud alert triggered",
 ]
 
+TICKET_BODIES = [
+    "I have been unable to access my account for the past 24 hours. Every time I try to log in, I receive an error message saying my credentials are invalid even though I am certain they are correct. I have tried resetting my password twice but the reset email never arrives. This is extremely urgent as I need to make a payment today.",
+    "I noticed a transaction on my statement that I did not authorize. The charge is for $2,500 from an online retailer I have never used. I need this investigated immediately and the funds returned to my account. I have not shared my card details with anyone.",
+    "I would like to request an increase to my credit card limit. My current limit is $10,000 and I am requesting $25,000. My income has increased significantly in the past year and I have maintained a perfect payment history.",
+    "The mobile banking app has been crashing every time I try to view my account summary. I have tried uninstalling and reinstalling the app, clearing the cache, and restarting my phone. I am using the latest version of the app on iOS.",
+    "I initiated a wire transfer 5 business days ago and the recipient has not received the funds. The transfer was for $15,000 to a domestic account. The funds have already been debited from my account but the recipient bank says they have no record of the incoming transfer.",
+    "My account balance shows $5,000 less than what I calculated based on my recent transactions. I have gone through each transaction in my statement and cannot find the discrepancy. I need someone to review my account history.",
+    "My debit card was declined at a grocery store today even though I have sufficient funds in my account. This is the third time this has happened this month. It is very embarrassing and I need this resolved immediately.",
+    "I believe the interest rate on my savings account is incorrect. My agreement states 3.5% APY but I am only receiving 2.1%. I have been a customer for over 10 years and I expect this to be corrected retroactively.",
+    "I lost my debit card while traveling abroad. I need it cancelled immediately and a replacement sent to my home address. I also need to check if there have been any unauthorized transactions since I lost it yesterday.",
+    "I have been charged twice for the same transaction at a restaurant. Both charges are for $85.50 and appeared on the same day. I need one of these charges reversed.",
+]
 
-# ---------------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------------
-
-def weighted_choice(options: dict) -> str:
-    """Pick from a dict of {value: weight}."""
-    items = list(options.keys())
-    weights = list(options.values())
-    return random.choices(items, weights=weights, k=1)[0]
-
-
-def pick_email_domain() -> str:
-    domains, weights = zip(*EMAIL_DOMAINS)
-    return random.choices(domains, weights=weights, k=1)[0]
-
-
-def realistic_email(first: str, last: str, birth_year: int) -> str:
-    """Generate a realistic-looking email from name parts."""
-    first_l = first.lower().replace(" ", "").replace("'", "")
-    last_l = last.lower().replace(" ", "").replace("'", "")
-    domain = pick_email_domain()
-    pattern = random.choices(
-        ["fl", "f.l", "f_l", "fl_yr", "f.l_yr", "first"],
-        weights=[0.30, 0.25, 0.15, 0.12, 0.10, 0.08],
-        k=1,
-    )[0]
-    yr = str(birth_year)[-2:]
-    if pattern == "fl":
-        local = f"{first_l}{last_l}"
-    elif pattern == "f.l":
-        local = f"{first_l}.{last_l}"
-    elif pattern == "f_l":
-        local = f"{first_l}_{last_l}"
-    elif pattern == "fl_yr":
-        local = f"{first_l}{last_l}{yr}"
-    elif pattern == "f.l_yr":
-        local = f"{first_l}.{last_l}{yr}"
-    else:
-        local = f"{first_l}{random.randint(1, 999)}"
-    return f"{local}@{domain}"
-
-
-def realistic_phone(country: str) -> str:
-    """Generate a phone number matching the country."""
-    formats = {
-        "USA":          "+1-{}{}-{}{}{}-{}{}{}{}",
-        "UK":           "+44-{}{}{}-{}{}{}-{}{}{}{}",
-        "Canada":       "+1-{}{}{}-{}{}{}-{}{}{}{}",
-        "Australia":    "+61-{}-{}{}{}{}-{}{}{}{}",
-        "Japan":        "+81-{}{}-{}{}{}{}-{}{}{}{}",
-        "Germany":      "+49-{}{}{}-{}{}{}{}{}{}",
-        "India":        "+91-{}{}{}{}{}-{}{}{}{}{}",
-        "Singapore":    "+65-{}{}{}{}-{}{}{}{}",
-        "UAE":          "+971-{}{}-{}{}{}-{}{}{}{}",
-        "Brazil":       "+55-{}{}-{}{}{}{}{}-{}{}{}{}",
-        "France":       "+33-{}-{}{}-{}{}-{}{}-{}{}",
-        "Switzerland":  "+41-{}{}-{}{}{}-{}{}-{}{}",
-        "Hong Kong":    "+852-{}{}{}{}-{}{}{}{}",
-        "South Korea":  "+82-{}{}-{}{}{}{}-{}{}{}{}",
-    }
-    fmt = formats.get(country, formats["USA"])
-    digits = [str(random.randint(1 if i == 0 else 0, 9)) for i in range(15)]
-    return fmt.format(*digits)
+PRIORITIES = ["LOW", "MEDIUM", "MEDIUM", "HIGH", "CRITICAL"]  # weighted toward MEDIUM
+RESOLUTIONS = ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED", "ESCALATED"]
+ASSIGNED_TEAMS = ["Support Team", "Fraud Team", "Card Services", "Tech Support", "Compliance"]
 
 
 # ---------------------------------------------------------------------------
 # DATA GENERATORS
 # ---------------------------------------------------------------------------
-
-def generate_customers(count: int) -> list[dict]:
-    """Generate realistic customer records."""
-    rows = []
-    for _ in range(count):
-        first = fake.first_name()
-        last = fake.last_name()
-        city, state, country = random.choice(LOCATIONS)
-        dob = fake.date_of_birth(minimum_age=20, maximum_age=70)
-        signup = datetime.now() - timedelta(days=random.randint(0, 730))
-
-        emp_status = weighted_choice(EMPLOYMENT_WEIGHTS)
-        inc_low, inc_mode, inc_high = INCOME_BY_EMPLOYMENT[emp_status]
-        income = round(random.triangular(inc_low, inc_high, inc_mode), 2)
-
-        # Credit score correlates loosely with income
-        base_score = int(500 + (income / 500000) * 250)
-        credit_score = max(300, min(850, base_score + random.randint(-80, 80)))
-
-        rows.append({
-            "FIRST_NAME": first,
-            "LAST_NAME": last,
-            "EMAIL": realistic_email(first, last, dob.year),
-            "PHONE": realistic_phone(country),
-            "DATE_OF_BIRTH": dob.strftime("%Y-%m-%d"),
-            "CITY": city,
-            "STATE": state,
-            "COUNTRY": country,
-            "ANNUAL_INCOME": income,
-            "EMPLOYMENT_STATUS": emp_status,
-            "CREDIT_SCORE": credit_score,
-            "SIGNUP_DATE": signup.strftime("%Y-%m-%d %H:%M:%S"),
-        })
-    return rows
-
 
 def generate_transactions(count: int) -> list[dict]:
     """Generate realistic transaction records with correlated merchants/amounts."""
@@ -243,7 +154,7 @@ def generate_transactions(count: int) -> list[dict]:
         flag_prob = 0.01 if amount < 500 else (0.05 if amount < 2000 else 0.10)
         is_flagged = random.random() < flag_prob
 
-        # Spread transactions over ~6 months with weekday bias
+        # Spread transactions over ~6 months
         txn_date = datetime.now() - timedelta(seconds=random.randint(0, 15552000))
 
         rows.append({
@@ -255,6 +166,24 @@ def generate_transactions(count: int) -> list[dict]:
             "CATEGORY": category,
             "CHANNEL": channel,
             "IS_FLAGGED": is_flagged,
+        })
+    return rows
+
+
+def generate_support_tickets(count: int) -> list[dict]:
+    """Generate realistic support ticket records with varied subjects and bodies."""
+    rows = []
+    for _ in range(count):
+        created = datetime.now() - timedelta(hours=random.randint(0, 4380))  # ~6 months
+
+        rows.append({
+            "CUSTOMER_ID": random.randint(1, 2000),
+            "CREATED_AT": created.strftime("%Y-%m-%d %H:%M:%S"),
+            "SUBJECT": random.choice(TICKET_SUBJECTS),
+            "PRIORITY": random.choice(PRIORITIES),
+            "BODY": random.choice(TICKET_BODIES),
+            "RESOLUTION_STATUS": random.choice(RESOLUTIONS),
+            "ASSIGNED_TO": random.choice(ASSIGNED_TEAMS),
         })
     return rows
 
@@ -328,33 +257,83 @@ def write_csv(rows: list[dict], filename: str, output_dir: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# S3 UPLOAD
+# ---------------------------------------------------------------------------
+
+def upload_to_s3(filepath: str, s3_subfolder: str, bucket: str, prefix: str, profile: str) -> None:
+    """Upload a local CSV file to S3 for Snowpipe auto-ingest."""
+    try:
+        import boto3
+    except ImportError:
+        print("  ERROR: boto3 not installed. Run: pip install boto3")
+        sys.exit(1)
+
+    session = boto3.Session(profile_name=profile)
+    s3 = session.client("s3")
+    filename = os.path.basename(filepath)
+    s3_key = f"{prefix}{s3_subfolder}/{filename}"
+
+    print(f"  Uploading {filepath} → s3://{bucket}/{s3_key}")
+    s3.upload_file(filepath, bucket, s3_key)
+    print(f"  Uploaded successfully.")
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(description="FINSERV CSV Generator & S3 Upload")
+    parser.add_argument(
+        "--local", action="store_true",
+        help="Local-only mode: generate CSVs without uploading to S3",
+    )
+    args = parser.parse_args()
+
     print("=" * 60)
-    print("FINSERV DEMO — CSV Generator (Realistic Data)")
+    print("FINSERV DEMO — CSV Generator & S3 Upload")
     print("=" * 60)
+    if args.local:
+        print("Mode: LOCAL (no S3 upload)")
+    else:
+        print(f"Mode: S3 (bucket={CONFIG['s3_bucket']}, prefix={CONFIG['s3_prefix']})")
 
     output_dir = CONFIG["output_dir"]
 
-    print("\n[1/3] Generating customers...")
-    customers = generate_customers(CONFIG["customers_count"])
-    write_csv(customers, "customers.csv", output_dir)
-
-    print("\n[2/3] Generating transactions...")
+    # --- Transactions ---
+    print(f"\n[1/3] Generating {CONFIG['transactions_count']:,} transactions...")
     transactions = generate_transactions(CONFIG["transactions_count"])
-    write_csv(transactions, "transactions.csv", output_dir)
+    txn_path = write_csv(transactions, "transactions.csv", output_dir)
+    if not args.local:
+        upload_to_s3(txn_path, "transactions", CONFIG["s3_bucket"], CONFIG["s3_prefix"], CONFIG["aws_profile"])
 
-    print("\n[3/3] Generating risk assessments...")
+    # --- Support Tickets ---
+    print(f"\n[2/3] Generating {CONFIG['support_tickets_count']:,} support tickets...")
+    tickets = generate_support_tickets(CONFIG["support_tickets_count"])
+    tkt_path = write_csv(tickets, "support_tickets.csv", output_dir)
+    if not args.local:
+        upload_to_s3(tkt_path, "support_tickets", CONFIG["s3_bucket"], CONFIG["s3_prefix"], CONFIG["aws_profile"])
+
+    # --- Risk Assessments ---
+    print(f"\n[3/3] Generating {CONFIG['risk_assessments_count']:,} risk assessments...")
     risk = generate_risk_assessments(CONFIG["risk_assessments_count"])
-    write_csv(risk, "risk_assessments.csv", output_dir)
+    risk_path = write_csv(risk, "risk_assessments.csv", output_dir)
+    if not args.local:
+        upload_to_s3(risk_path, "risk_assessments", CONFIG["s3_bucket"], CONFIG["s3_prefix"], CONFIG["aws_profile"])
 
+    # --- Summary ---
     print("\n" + "=" * 60)
-    print("Done! CSV files ready for Snowflake ingestion.")
-    print(f"Files saved in: {os.path.abspath(output_dir)}/")
-    print("\nNext step: PUT files to internal stage and COPY INTO")
-    print("  See: 04_s3_stage_and_snowpipe.sql")
+    print("Done! CSV files generated:")
+    print(f"  {os.path.abspath(output_dir)}/transactions.csv      ({CONFIG['transactions_count']:,} rows)")
+    print(f"  {os.path.abspath(output_dir)}/support_tickets.csv   ({CONFIG['support_tickets_count']:,} rows)")
+    print(f"  {os.path.abspath(output_dir)}/risk_assessments.csv  ({CONFIG['risk_assessments_count']:,} rows)")
+    if args.local:
+        print("\nLocal mode — files NOT uploaded to S3.")
+        print("To upload, run without --local flag (requires boto3 + AWS credentials).")
+    else:
+        print(f"\nFiles uploaded to s3://{CONFIG['s3_bucket']}/{CONFIG['s3_prefix']}")
+        print("Snowpipe auto-ingest will pick up the files automatically.")
+    print("Next step: See 04_s3_stage_and_snowpipe.sql")
     print("=" * 60)
 
 

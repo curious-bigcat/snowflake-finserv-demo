@@ -241,7 +241,87 @@ GROUP BY DATE_TRUNC('MONTH', METRIC_DATE);
 
 
 -- ============================================================
--- 7. PIPELINE_METRICS TABLE (for task DAG)
+-- 7. DT_MARKET_OVERVIEW
+--    Market performance summary from curated market data.
+-- ============================================================
+
+CREATE OR REPLACE DYNAMIC TABLE CONSUMPTION.DT_MARKET_OVERVIEW
+    TARGET_LAG = DOWNSTREAM
+    WAREHOUSE = FINSERV_WH
+    COMMENT = 'Market overview: latest price, volume, and technical signals per ticker'
+AS
+SELECT
+    TICKER,
+    TRADE_DATE,
+    CLOSE_PRICE,
+    OPEN_PRICE,
+    HIGH_PRICE,
+    LOW_PRICE,
+    VOLUME,
+    ROUND((CLOSE_PRICE - OPEN_PRICE) / NULLIF(OPEN_PRICE, 0) * 100, 2) AS DAILY_RETURN_PCT,
+    RSI,
+    MACD,
+    SMA_20,
+    CASE
+        WHEN RSI > 70 THEN 'OVERBOUGHT'
+        WHEN RSI < 30 THEN 'OVERSOLD'
+        ELSE 'NEUTRAL'
+    END AS RSI_SIGNAL,
+    CASE
+        WHEN MACD > 0 THEN 'BULLISH'
+        ELSE 'BEARISH'
+    END AS MACD_SIGNAL
+FROM CURATED.MV_MARKET_LATEST;
+
+
+-- ============================================================
+-- 8. DT_COMPLIANCE_SUMMARY
+--    Compliance document aggregates by type, regulatory body, status.
+-- ============================================================
+
+CREATE OR REPLACE DYNAMIC TABLE CONSUMPTION.DT_COMPLIANCE_SUMMARY
+    TARGET_LAG = DOWNSTREAM
+    WAREHOUSE = FINSERV_WH
+    COMMENT = 'Compliance document summary by type, body, and status'
+AS
+SELECT
+    DOC_TYPE,
+    REGULATORY_BODY,
+    DOC_STATUS,
+    CLASSIFICATION,
+    REVIEW_CYCLE,
+    COUNT(*)                          AS DOC_COUNT,
+    AVG(CONTENT_LENGTH)               AS AVG_CONTENT_LENGTH,
+    MIN(CREATED_AT)                   AS EARLIEST_DOC,
+    MAX(CREATED_AT)                   AS LATEST_DOC
+FROM CURATED.DT_COMPLIANCE_ENRICHED
+GROUP BY DOC_TYPE, REGULATORY_BODY, DOC_STATUS, CLASSIFICATION, REVIEW_CYCLE;
+
+
+-- ============================================================
+-- 9. DT_RISK_FACTOR_SUMMARY
+--    Aggregated risk factor analysis from parsed risk assessments.
+-- ============================================================
+
+CREATE OR REPLACE DYNAMIC TABLE CONSUMPTION.DT_RISK_FACTOR_SUMMARY
+    TARGET_LAG = DOWNSTREAM
+    WAREHOUSE = FINSERV_WH
+    COMMENT = 'Risk factor aggregates: avg scores, distributions by factor type'
+AS
+SELECT
+    RISK_FACTOR,
+    RISK_LEVEL,
+    COUNT(*)                          AS ASSESSMENT_COUNT,
+    AVG(RISK_SCORE)                   AS AVG_RISK_SCORE,
+    AVG(DEBT_TO_INCOME)               AS AVG_DEBT_TO_INCOME,
+    MIN(RISK_SCORE)                   AS MIN_RISK_SCORE,
+    MAX(RISK_SCORE)                   AS MAX_RISK_SCORE
+FROM CURATED.DT_RISK_FACTORS_PARSED
+GROUP BY RISK_FACTOR, RISK_LEVEL;
+
+
+-- ============================================================
+-- 10. PIPELINE_METRICS TABLE (for task DAG)
 -- ============================================================
 
 CREATE OR REPLACE TABLE CONSUMPTION.PIPELINE_METRICS (
@@ -257,7 +337,7 @@ CREATE OR REPLACE TABLE CONSUMPTION.PIPELINE_METRICS (
 
 
 -- ============================================================
--- 8. VERIFICATION
+-- 11. VERIFICATION
 -- ============================================================
 
 SELECT 'DT_CUSTOMER_360'           AS TABLE_NAME, COUNT(*) AS ROW_COUNT FROM CONSUMPTION.DT_CUSTOMER_360
@@ -271,4 +351,10 @@ UNION ALL
 SELECT 'DT_CHURN_FEATURES',         COUNT(*) FROM CONSUMPTION.DT_CHURN_FEATURES
 UNION ALL
 SELECT 'DT_MONTHLY_REVENUE',        COUNT(*) FROM CONSUMPTION.DT_MONTHLY_REVENUE
+UNION ALL
+SELECT 'DT_MARKET_OVERVIEW',        COUNT(*) FROM CONSUMPTION.DT_MARKET_OVERVIEW
+UNION ALL
+SELECT 'DT_COMPLIANCE_SUMMARY',     COUNT(*) FROM CONSUMPTION.DT_COMPLIANCE_SUMMARY
+UNION ALL
+SELECT 'DT_RISK_FACTOR_SUMMARY',    COUNT(*) FROM CONSUMPTION.DT_RISK_FACTOR_SUMMARY
 ORDER BY TABLE_NAME;

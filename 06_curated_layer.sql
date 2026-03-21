@@ -182,7 +182,32 @@ FROM BASE.RISK_ASSESSMENTS r,
 
 
 -- ============================================================
--- 6. VERIFICATION
+-- 6. DT_COMPLIANCE_ENRICHED
+--    Compliance documents with parsed METADATA for reporting.
+-- ============================================================
+
+CREATE OR REPLACE DYNAMIC TABLE CURATED.DT_COMPLIANCE_ENRICHED
+    TARGET_LAG = '1 MINUTE'
+    WAREHOUSE = FINSERV_WH
+    COMMENT = 'Compliance documents with parsed metadata fields'
+AS
+SELECT
+    d.DOC_ID,
+    d.DOC_TYPE,
+    d.DOC_CONTENT,
+    d.CREATED_AT,
+    d.METADATA:regulatory_body::VARCHAR     AS REGULATORY_BODY,
+    d.METADATA:status::VARCHAR              AS DOC_STATUS,
+    d.METADATA:version::VARCHAR             AS DOC_VERSION,
+    d.METADATA:effective_date::VARCHAR      AS EFFECTIVE_DATE,
+    d.METADATA:review_cycle::VARCHAR        AS REVIEW_CYCLE,
+    d.METADATA:classification::VARCHAR      AS CLASSIFICATION,
+    LENGTH(d.DOC_CONTENT)                   AS CONTENT_LENGTH
+FROM BASE.COMPLIANCE_DOCUMENTS d;
+
+
+-- ============================================================
+-- 7. VERIFICATION
 -- ============================================================
 
 SELECT 'DT_CUSTOMER_PROFILE'   AS TABLE_NAME, COUNT(*) AS ROW_COUNT FROM CURATED.DT_CUSTOMER_PROFILE
@@ -194,4 +219,6 @@ UNION ALL
 SELECT 'MV_MARKET_LATEST',        COUNT(*) FROM CURATED.MV_MARKET_LATEST
 UNION ALL
 SELECT 'DT_RISK_FACTORS_PARSED',  COUNT(*) FROM CURATED.DT_RISK_FACTORS_PARSED
+UNION ALL
+SELECT 'DT_COMPLIANCE_ENRICHED',  COUNT(*) FROM CURATED.DT_COMPLIANCE_ENRICHED
 ORDER BY TABLE_NAME;

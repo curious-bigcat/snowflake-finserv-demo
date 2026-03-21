@@ -1,7 +1,8 @@
 /*=============================================================================
   FINSERV DEMO — Step 02: Base Tables & Synthetic Data
-  Creates 7 tables in BASE schema and populates them with GENERATOR()-based
-  synthetic data (structured, semi-structured, and unstructured).
+  Creates 7 tables in BASE schema. 4 tables are populated with GENERATOR()-based
+  synthetic data here; 3 tables (TRANSACTIONS, RISK_ASSESSMENTS, SUPPORT_TICKETS)
+  are populated via CSV → S3 → Snowpipe ingestion in file 04.
 =============================================================================*/
 
 USE ROLE ACCOUNTADMIN;
@@ -225,7 +226,7 @@ FROM ACCT_BASE;
 
 
 -- ============================================================
--- 3. TRANSACTIONS (~10,000 rows) — Structured
+-- 3. TRANSACTIONS — Table only (data loaded via Snowpipe, see file 04)
 -- ============================================================
 
 CREATE OR REPLACE TABLE TRANSACTIONS (
@@ -241,92 +242,11 @@ CREATE OR REPLACE TABLE TRANSACTIONS (
     CONSTRAINT PK_TRANSACTIONS PRIMARY KEY (TXN_ID),
     CONSTRAINT FK_TXN_ACCOUNT FOREIGN KEY (ACCOUNT_ID) REFERENCES ACCOUNTS(ACCOUNT_ID)
 );
-
-INSERT INTO TRANSACTIONS (ACCOUNT_ID, TXN_DATE, TXN_TYPE, AMOUNT, MERCHANT_NAME, CATEGORY, CHANNEL, IS_FLAGGED)
-WITH TXN_BASE AS (
-    SELECT
-        UNIFORM(0,19,RANDOM()) AS M_IDX,
-        UNIFORM(1, 3000, RANDOM()) AS ACCOUNT_ID,
-        DATEADD('second', -UNIFORM(0, 15552000, RANDOM()), CURRENT_TIMESTAMP()) AS TXN_DATE,
-        UNIFORM(0,5,RANDOM()) AS CH_ROLL
-    FROM TABLE(GENERATOR(ROWCOUNT => 10000))
-),
-TXN_DETAIL AS (
-    SELECT
-        ACCOUNT_ID,
-        TXN_DATE,
-        CH_ROLL,
-        -- 20 real merchants
-        ARRAY_CONSTRUCT('Amazon','Walmart','Starbucks','Shell','Target',
-                        'Apple','Netflix','Uber','Delta Air Lines','Costco',
-                        'Home Depot','Whole Foods','Chase Transfer','Wire Transfer','ATM Withdrawal',
-                        'DoorDash','CVS Pharmacy','Verizon','Fidelity','Marriott')
-            [M_IDX]::VARCHAR AS MERCHANT_NAME,
-        -- Category correlated 1:1 with merchant
-        ARRAY_CONSTRUCT('SHOPPING','GROCERIES','DINING','FUEL','SHOPPING',
-                        'SHOPPING','ENTERTAINMENT','TRAVEL','TRAVEL','GROCERIES',
-                        'UTILITIES','GROCERIES','TRANSFER','TRANSFER','TRANSFER',
-                        'DINING','HEALTHCARE','UTILITIES','INVESTMENT','TRAVEL')
-            [M_IDX]::VARCHAR AS CATEGORY,
-        -- Amount range correlated with merchant (cents, divided by 100 later)
-        ROUND(CASE M_IDX
-            WHEN 0  THEN UNIFORM(500, 50000, RANDOM())
-            WHEN 1  THEN UNIFORM(1500, 25000, RANDOM())
-            WHEN 2  THEN UNIFORM(300, 1500, RANDOM())
-            WHEN 3  THEN UNIFORM(2000, 9000, RANDOM())
-            WHEN 4  THEN UNIFORM(1000, 30000, RANDOM())
-            WHEN 5  THEN UNIFORM(5000, 200000, RANDOM())
-            WHEN 6  THEN UNIFORM(700, 2300, RANDOM())
-            WHEN 7  THEN UNIFORM(800, 6000, RANDOM())
-            WHEN 8  THEN UNIFORM(15000, 140000, RANDOM())
-            WHEN 9  THEN UNIFORM(5000, 40000, RANDOM())
-            WHEN 10 THEN UNIFORM(1500, 60000, RANDOM())
-            WHEN 11 THEN UNIFORM(2000, 18000, RANDOM())
-            WHEN 12 THEN UNIFORM(10000, 500000, RANDOM())
-            WHEN 13 THEN UNIFORM(50000, 500000, RANDOM())
-            WHEN 14 THEN UNIFORM(2000, 50000, RANDOM())
-            WHEN 15 THEN UNIFORM(1500, 6500, RANDOM())
-            WHEN 16 THEN UNIFORM(500, 15000, RANDOM())
-            WHEN 17 THEN UNIFORM(4000, 20000, RANDOM())
-            WHEN 18 THEN UNIFORM(20000, 500000, RANDOM())
-            ELSE         UNIFORM(10000, 50000, RANDOM())
-        END / 100.0, 2) AS AMOUNT
-    FROM TXN_BASE
-)
-SELECT
-    ACCOUNT_ID,
-    TXN_DATE,
-    -- Transaction type based on category
-    CASE CATEGORY
-        WHEN 'TRANSFER' THEN 'TRANSFER'
-        ELSE CASE WHEN UNIFORM(0,5,RANDOM()) = 0 THEN 'CREDIT' ELSE 'DEBIT' END
-    END AS TXN_TYPE,
-    AMOUNT,
-    MERCHANT_NAME,
-    CATEGORY,
-    -- Channel correlated with merchant type
-    CASE
-        WHEN MERCHANT_NAME = 'ATM Withdrawal' THEN 'ATM'
-        WHEN MERCHANT_NAME IN ('Netflix','Fidelity') THEN 'ONLINE'
-        WHEN MERCHANT_NAME IN ('Uber','DoorDash') THEN 'MOBILE'
-        WHEN MERCHANT_NAME IN ('Shell','Costco','Whole Foods','CVS Pharmacy') THEN 'POS'
-        WHEN MERCHANT_NAME IN ('Amazon','Verizon','Delta Air Lines','Marriott')
-            THEN CASE WHEN CH_ROLL <= 3 THEN 'ONLINE' ELSE 'MOBILE' END
-        WHEN MERCHANT_NAME IN ('Chase Transfer','Wire Transfer')
-            THEN ARRAY_CONSTRUCT('ONLINE','MOBILE','BRANCH')[UNIFORM(0,2,RANDOM())]::VARCHAR
-        ELSE CASE CH_ROLL WHEN 0 THEN 'ONLINE' WHEN 1 THEN 'MOBILE' ELSE 'POS' END
-    END AS CHANNEL,
-    -- Higher amounts more likely flagged
-    CASE
-        WHEN AMOUNT > 2000 THEN IFF(UNIFORM(1, 100, RANDOM()) <= 10, TRUE, FALSE)
-        WHEN AMOUNT > 500  THEN IFF(UNIFORM(1, 100, RANDOM()) <= 5, TRUE, FALSE)
-        ELSE IFF(UNIFORM(1, 100, RANDOM()) <= 1, TRUE, FALSE)
-    END AS IS_FLAGGED
-FROM TXN_DETAIL;
+-- NOTE: ~10,000 rows loaded via CSV → S3 → Snowpipe (file 04)
 
 
 -- ============================================================
--- 4. RISK_ASSESSMENTS (~2,000 rows) — Semi-Structured (VARIANT)
+-- 4. RISK_ASSESSMENTS — Table only (data loaded via Snowpipe, see file 04)
 -- ============================================================
 
 CREATE OR REPLACE TABLE RISK_ASSESSMENTS (
@@ -337,24 +257,7 @@ CREATE OR REPLACE TABLE RISK_ASSESSMENTS (
     CONSTRAINT PK_RISK PRIMARY KEY (ASSESSMENT_ID),
     CONSTRAINT FK_RISK_CUSTOMER FOREIGN KEY (CUSTOMER_ID) REFERENCES CUSTOMERS(CUSTOMER_ID)
 );
-
-INSERT INTO RISK_ASSESSMENTS (CUSTOMER_ID, ASSESSED_AT, RISK_DATA)
-SELECT
-    UNIFORM(1, 2000, RANDOM())                            AS CUSTOMER_ID,
-    DATEADD('day', -UNIFORM(0, 365, RANDOM()), CURRENT_TIMESTAMP()) AS ASSESSED_AT,
-    OBJECT_CONSTRUCT(
-        'risk_score',       UNIFORM(1, 100, RANDOM()),
-        'credit_history',   ARRAY_CONSTRUCT('EXCELLENT','GOOD','FAIR','POOR')[UNIFORM(0,3,RANDOM())]::VARCHAR,
-        'debt_to_income',   ROUND(UNIFORM(5, 80, RANDOM()) / 100.0, 2),
-        'risk_factors',     ARRAY_CONSTRUCT(
-            OBJECT_CONSTRUCT('factor', 'payment_history',  'score', UNIFORM(1,100,RANDOM())),
-            OBJECT_CONSTRUCT('factor', 'credit_utilization','score', UNIFORM(1,100,RANDOM())),
-            OBJECT_CONSTRUCT('factor', 'account_age',      'score', UNIFORM(1,100,RANDOM()))
-        ),
-        'assessment_type',  ARRAY_CONSTRUCT('STANDARD','ENHANCED','EXPEDITED')[UNIFORM(0,2,RANDOM())]::VARCHAR,
-        'model_version',    'v2.3.' || UNIFORM(0,9,RANDOM())::TEXT
-    ) AS RISK_DATA
-FROM TABLE(GENERATOR(ROWCOUNT => 2000));
+-- NOTE: ~2,000 rows loaded via CSV → S3 → Snowpipe (file 04)
 
 
 -- ============================================================
@@ -391,7 +294,7 @@ FROM TABLE(GENERATOR(ROWCOUNT => 5000));
 
 
 -- ============================================================
--- 6. SUPPORT_TICKETS (~1,000 rows) — Unstructured (TEXT)
+-- 6. SUPPORT_TICKETS — Table only (data loaded via Snowpipe, see file 04)
 -- ============================================================
 
 CREATE OR REPLACE TABLE SUPPORT_TICKETS (
@@ -406,47 +309,7 @@ CREATE OR REPLACE TABLE SUPPORT_TICKETS (
     CONSTRAINT PK_TICKETS PRIMARY KEY (TICKET_ID),
     CONSTRAINT FK_TICKETS_CUSTOMER FOREIGN KEY (CUSTOMER_ID) REFERENCES CUSTOMERS(CUSTOMER_ID)
 );
-
-INSERT INTO SUPPORT_TICKETS (CUSTOMER_ID, CREATED_AT, SUBJECT, PRIORITY, BODY, RESOLUTION_STATUS, ASSIGNED_TO)
-SELECT
-    UNIFORM(1, 2000, RANDOM()) AS CUSTOMER_ID,
-    DATEADD('hour', -UNIFORM(0, 4380, RANDOM()), CURRENT_TIMESTAMP()) AS CREATED_AT,
-    ARRAY_CONSTRUCT(
-        'Account access issue',
-        'Unauthorized transaction reported',
-        'Request for credit limit increase',
-        'Mobile app not loading',
-        'Wire transfer delay',
-        'Incorrect balance displayed',
-        'Card declined at merchant',
-        'Interest rate dispute',
-        'Lost debit card',
-        'Duplicate charge on statement',
-        'Account closure request',
-        'PIN reset needed',
-        'Foreign transaction fee inquiry',
-        'Direct deposit not received',
-        'Fraud alert triggered'
-    )[UNIFORM(0,14,RANDOM())]::VARCHAR AS SUBJECT,
-    ARRAY_CONSTRUCT('LOW','MEDIUM','HIGH','CRITICAL')
-        [UNIFORM(0,3,RANDOM())]::VARCHAR AS PRIORITY,
-    ARRAY_CONSTRUCT(
-        'I have been unable to access my account for the past 24 hours. Every time I try to log in, I receive an error message saying my credentials are invalid even though I am certain they are correct. I have tried resetting my password twice but the reset email never arrives. This is extremely urgent as I need to make a payment today.',
-        'I noticed a transaction on my statement that I did not authorize. The charge is for $2,500 from an online retailer I have never used. I need this investigated immediately and the funds returned to my account. I have not shared my card details with anyone.',
-        'I would like to request an increase to my credit card limit. My current limit is $10,000 and I am requesting $25,000. My income has increased significantly in the past year and I have maintained a perfect payment history.',
-        'The mobile banking app has been crashing every time I try to view my account summary. I have tried uninstalling and reinstalling the app, clearing the cache, and restarting my phone. I am using the latest version of the app on iOS.',
-        'I initiated a wire transfer 5 business days ago and the recipient has not received the funds. The transfer was for $15,000 to a domestic account. The funds have already been debited from my account but the recipient bank says they have no record of the incoming transfer.',
-        'My account balance shows $5,000 less than what I calculated based on my recent transactions. I have gone through each transaction in my statement and cannot find the discrepancy. I need someone to review my account history.',
-        'My debit card was declined at a grocery store today even though I have sufficient funds in my account. This is the third time this has happened this month. It is very embarrassing and I need this resolved immediately.',
-        'I believe the interest rate on my savings account is incorrect. My agreement states 3.5% APY but I am only receiving 2.1%. I have been a customer for over 10 years and I expect this to be corrected retroactively.',
-        'I lost my debit card while traveling abroad. I need it cancelled immediately and a replacement sent to my home address. I also need to check if there have been any unauthorized transactions since I lost it yesterday.',
-        'I have been charged twice for the same transaction at a restaurant. Both charges are for $85.50 and appeared on the same day. I need one of these charges reversed.'
-    )[UNIFORM(0,9,RANDOM())]::TEXT AS BODY,
-    ARRAY_CONSTRUCT('OPEN','IN_PROGRESS','RESOLVED','CLOSED','ESCALATED')
-        [UNIFORM(0,4,RANDOM())]::VARCHAR AS RESOLUTION_STATUS,
-    ARRAY_CONSTRUCT('Support Team','Fraud Team','Card Services','Tech Support','Compliance')
-        [UNIFORM(0,4,RANDOM())]::VARCHAR AS ASSIGNED_TO
-FROM TABLE(GENERATOR(ROWCOUNT => 1000));
+-- NOTE: ~1,000 rows loaded via CSV → S3 → Snowpipe (file 04)
 
 
 -- ============================================================
@@ -496,6 +359,8 @@ FROM TABLE(GENERATOR(ROWCOUNT => 200));
 -- ============================================================
 -- 8. VERIFY TABLE COUNTS
 -- ============================================================
+-- CUSTOMERS=2000, ACCOUNTS=3000, MARKET_DATA=5000, COMPLIANCE_DOCUMENTS=200
+-- TRANSACTIONS, RISK_ASSESSMENTS, SUPPORT_TICKETS = 0 (populated via Snowpipe in file 04)
 
 SELECT 'CUSTOMERS'             AS TABLE_NAME, COUNT(*) AS ROW_COUNT FROM CUSTOMERS
 UNION ALL SELECT 'ACCOUNTS',             COUNT(*) FROM ACCOUNTS
