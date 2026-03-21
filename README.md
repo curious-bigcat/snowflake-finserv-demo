@@ -1,6 +1,6 @@
 # Snowflake Financial Services Demo (FINSERV)
 
-Full-stack Snowflake demo project implementing a **medallion architecture** data pipeline for a fictional financial services company. Covers 20+ Snowflake features across data engineering, AI/ML, and application development.
+Full-stack Snowflake demo project implementing a **medallion architecture** data pipeline for a fictional financial services company. Covers 22+ Snowflake features across data engineering, AI/ML, security, data governance, and application development.
 
 ---
 
@@ -14,9 +14,9 @@ Full-stack Snowflake demo project implementing a **medallion architecture** data
 │  │   BASE   │───▶│   RAW    │───▶│   CURATED    │───▶│  CONSUMPTION   │    │
 │  │          │    │          │    │              │    │                │    │
 │  │ 7 tables │    │ 7 streams│    │ 4 dynamic    │    │ 6 dynamic      │    │
-│  │ GENERATOR│    │ 3 staging│    │   tables     │    │   tables       │    │
-│  │ data     │    │ Snowpipe │    │ 1 mat. view  │    │ 2 SPs, 2 UDFs │    │
-│  │          │    │ S3 land. │    │              │    │ 1 UDTF         │    │
+│  │ GENERATOR│    │ Snowpipe │    │   tables     │    │   tables       │    │
+│  │ data     │    │ S3 land. │    │              │    │ 2 SPs, 2 UDFs │    │
+│  │          │    │          │    │              │    │ 1 UDTF         │    │
 │  └──────────┘    └──────────┘    └──────────────┘    └────────────────┘    │
 │       │                │                                      │            │
 │       │           Task DAG                              MCP Server         │
@@ -24,6 +24,14 @@ Full-stack Snowflake demo project implementing a **medallion architecture** data
 │       ▼                                             Streamlit Dashboard    │
 │  CSV Generator                                      ML Notebooks (2)      │
 │  S3 Upload                                          Semantic Model        │
+│                                                                             │
+│  ┌──────────────────────────────────────┐    ┌────────────────────────┐    │
+│  │          SECURITY LAYER              │    │     GOVERNANCE         │    │
+│  │ 9 roles (RBAC), network policy       │    │ 4 tags, CLASSIFY      │    │
+│  │ 5 masking policies, 2 RAPs           │    │ tag-based masking      │    │
+│  │ session policy, IP restrictions      │    │ aggregation/projection │    │
+│  │                                      │    │ 5 DMFs, audit views    │    │
+│  └──────────────────────────────────────┘    └────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -137,6 +145,13 @@ streamlit run 15_streamlit_dashboard.py
 | # | File | What It Does | Objects Created |
 |---|------|-------------|-----------------|
 | 20 | `20_performance_exploration.sql` | 10 performance concepts: EXPLAIN plans, warehouse sizing, clustering, search optimization, caching, spill analysis, query acceleration, resource monitors | `TRANSACTIONS_CLUSTERED`, `FINSERV_WH_SMALL`, `FINSERV_MONITOR`, `PERFORMANCE_SUMMARY` |
+
+### Phase 9: Security & Data Governance (Files 21-22)
+
+| # | File | What It Does | Objects Created |
+|---|------|-------------|-----------------|
+| 21 | `21_security.sql` | End-to-end security: RBAC hierarchy (5 functional + 4 access roles), network policy, session policy, dynamic data masking (PII + financial), row access policies (ticket assignment + country-based) | 9 custom roles, `FINSERV_NETWORK_POLICY`, `FINSERV_SESSION_POLICY`, 5 masking policies, 2 row access policies, `SUPPORT_AGENT_MAP`, `ANALYST_COUNTRY_MAP` |
+| 22 | `22_data_governance.sql` | Data governance: classification tags, automated SYSTEM$CLASSIFY, tag-based masking, aggregation policy, projection policy, 5 data metric functions, access history audit, governance summary dashboard | `GOVERNANCE` schema, 4 tags, 4 tag-based masking policies, 1 aggregation policy, 1 projection policy, 5 DMFs, `GOVERNANCE_SUMMARY` |
 
 ---
 

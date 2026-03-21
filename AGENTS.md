@@ -3,8 +3,8 @@
 ## Project Overview
 
 Deploy and validate a full-stack Snowflake financial services demo (FINSERV) end-to-end.
-The project implements a **medallion architecture** (BASE → RAW → CURATED → CONSUMPTION) with
-20 files covering data engineering, Cortex AI, MCP, Streamlit, ML, and performance optimization.
+The project implements a **medallion architecture** (BASE → RAW → CURATED → CONSUMPTION → GOVERNANCE) with
+22 files covering data engineering, Cortex AI, MCP, Streamlit, ML, performance optimization, security, and data governance.
 
 ## Connection
 
@@ -138,6 +138,36 @@ to enable targeted error handling.
 - Creates: `TRANSACTIONS_CLUSTERED`, `FINSERV_WH_SMALL` (suspend after use), `FINSERV_MONITOR`, `PERFORMANCE_SUMMARY`
 - Execute sections sequentially (some depend on prior sections' query history)
 
+### Phase 9: Security & Data Governance
+
+**File 21 — `21_security.sql`** (deploy BEFORE file 22)
+- 10 sections — execute in order (later sections reference roles/policies from earlier sections)
+- **Section 1**: Creates 4 access roles (`FINSERV_BASE_READ`, `FINSERV_CURATED_READ`, `FINSERV_CONSUMPTION_READ`, `FINSERV_RAW_WRITE`) and 5 functional roles (`FINSERV_ADMIN`, `FINSERV_ANALYST`, `FINSERV_DATA_ENGINEER`, `FINSERV_COMPLIANCE_OFFICER`, `FINSERV_SUPPORT_AGENT`). Wires: access → functional → SYSADMIN
+- **Section 2**: Grants database/schema/table/view privileges per access role, plus FUTURE GRANTS. Warehouse USAGE for all functional roles
+- **Section 3**: `FINSERV_NETWORK_POLICY` — sample corporate/VPN IP ranges. **Note**: `ALTER ACCOUNT SET NETWORK_POLICY` is commented out for demo safety — do NOT uncomment unless you have verified IPs
+- **Section 4**: `FINSERV_SESSION_POLICY` (30-min idle, 15-min UI idle) — applied to `FINSERV_ANALYST` role only as demo
+- **Section 5**: 4 PII masking policies (`MASK_PII_STRING`, `MASK_PII_DATE`, `MASK_PII_NUMBER`, `MASK_CREDIT_SCORE`) applied to 7 CUSTOMERS columns (FIRST_NAME, LAST_NAME, EMAIL, PHONE, DATE_OF_BIRTH, ANNUAL_INCOME, CREDIT_SCORE). Only FINSERV_ADMIN and FINSERV_COMPLIANCE_OFFICER see unmasked values
+- **Section 6**: `MASK_FINANCIAL_AMOUNT` applied to ACCOUNTS.BALANCE and CREDIT_LIMIT. Visible to ADMIN, ANALYST, and COMPLIANCE
+- **Section 7**: `RAP_SUPPORT_TICKETS` row access policy with `SUPPORT_AGENT_MAP` mapping table. Support agents see only their assigned tickets; ADMIN/COMPLIANCE see all
+- **Section 8**: `RAP_CUSTOMER_COUNTRY` row access policy with `ANALYST_COUNTRY_MAP` mapping table. Analysts see only customers in assigned countries; ADMIN/COMPLIANCE see all
+- **Section 9**: Verification queries (commented out) — switch to each role and test visibility
+- **Section 10**: Audit queries against ACCOUNT_USAGE views (GRANTS_TO_ROLES, POLICY_REFERENCES, LOGIN_HISTORY)
+- Verify: `SELECT * FROM TABLE(INFORMATION_SCHEMA.POLICY_REFERENCES(REF_ENTITY_DOMAIN=>'TABLE', REF_ENTITY_NAME=>'FINSERV_DB.BASE.CUSTOMERS'))` returns masking and RAP policies
+
+**File 22 — `22_data_governance.sql`** (deploy AFTER file 21)
+- 10 sections — execute in order. Depends on roles from file 21 (FINSERV_ADMIN, FINSERV_COMPLIANCE_OFFICER, etc.)
+- **Section 1**: Creates `GOVERNANCE` schema and 4 tags: `DATA_CLASSIFICATION` (PII/RESTRICTED/SENSITIVE/INTERNAL/PUBLIC), `DATA_OWNER` (6 teams), `REGULATORY_FRAMEWORK` (GDPR/CCPA/PCI_DSS/SOX/BSA_AML/NONE), `RETENTION_POLICY` (30d to indefinite)
+- **Section 2**: Manual tag assignment on columns and tables across all 7 BASE tables. 19 column-level DATA_CLASSIFICATION tags, plus table-level DATA_OWNER, REGULATORY_FRAMEWORK, RETENTION_POLICY
+- **Section 3**: `SYSTEM$CLASSIFY` on CUSTOMERS, SUPPORT_TICKETS, ACCOUNTS with `auto_tag: true`. Requires Enterprise edition. Then queries TAG_REFERENCES to compare auto vs manual classification
+- **Section 4**: 4 tag-based masking policies (`TAG_MASK_STRING`, `TAG_MASK_NUMBER`, `TAG_MASK_DATE`, `TAG_MASK_VARIANT`) attached to `DATA_CLASSIFICATION` tag via `ALTER TAG ... SET MASKING POLICY`. **Important**: Tag-based masking and column-level masking (from file 21) are mutually exclusive per column — file 21's column-level policies take precedence on existing columns; tag-based policies auto-protect new columns tagged in the future
+- **Section 5**: `TAG_RAP_RESTRICTED` tag-based row access policy — pattern for future tables
+- **Section 6**: `FINSERV_AGGREGATION_POLICY` with `MIN_GROUP_SIZE => 5` applied to CUSTOMERS. Analysts querying CUSTOMERS must use GROUP BY with at least 5 rows per group
+- **Section 7**: `FINSERV_PROJECTION_POLICY` applied to CUSTOMERS.EMAIL — EMAIL can be used in WHERE clauses but cannot appear in SELECT output
+- **Section 8**: 5 DMFs: `DMF_NULL_ACCOUNT_ID` (null checks), `DMF_CREDIT_SCORE_RANGE` (300-850 range), `DMF_EMAIL_FORMAT` (@ format), `DMF_NEGATIVE_BALANCE` (negative balance check), `DMF_FUTURE_TXN_DATE` (future date check). Scheduled every 60 minutes on BASE tables
+- **Section 9**: Audit queries — ACCESS_HISTORY for PII access, TAG_REFERENCES coverage, POLICY_REFERENCES coverage, query volume by role, DMF results from DATA_QUALITY_MONITORING_RESULTS
+- **Section 10**: Creates `CONSUMPTION.GOVERNANCE_SUMMARY` table aggregating classification %, masked columns, RAP tables, role/tag/DMF counts
+- Verify: `SELECT * FROM FINSERV_DB.CONSUMPTION.GOVERNANCE_SUMMARY` returns governance metrics
+
 ## Deployment Rules
 
 1. **Execute objects individually**, not full files — enables targeted error handling
@@ -149,6 +179,11 @@ to enable targeted error handling.
 7. **Verify row counts** after each layer deployment matches expected values
 8. **Skip S3/Snowpipe** sections if no real S3 bucket is configured
 9. **Skip Cortex Agent** DDL if not available in the account region
+10. **File 21 must deploy before file 22** — governance tags/policies reference roles created in security file
+11. **Do NOT uncomment `ALTER ACCOUNT SET NETWORK_POLICY`** in file 21 unless IP ranges are verified for your environment
+12. **Tag-based masking and column-level masking are mutually exclusive** per column — column-level (file 21) takes precedence; tag-based (file 22) auto-protects future tagged columns
+13. **Aggregation policy on CUSTOMERS** requires GROUP BY with min 5 rows per group — queries returning fewer will error
+14. **SYSTEM$CLASSIFY** requires Enterprise edition — skip Section 3 of file 22 if on Standard edition
 
 ## Validation Checklist
 
@@ -165,6 +200,11 @@ After full deployment, verify:
 - [ ] SP_PIPELINE_SUMMARY returns 21 rows with all ROW_COUNT > 0
 - [ ] All 5 data quality checks return ISSUE_COUNT = 0
 - [ ] Incremental test: new customers visible in DT_CUSTOMER_360
+- [ ] 9 custom roles exist (4 access + 5 functional) with correct hierarchy
+- [ ] 5 masking policies and 2 row access policies attached to BASE tables
+- [ ] GOVERNANCE schema with 4 tags, all BASE table columns tagged
+- [ ] 5 DMFs scheduled on BASE tables (60-min interval)
+- [ ] GOVERNANCE_SUMMARY table populated with governance metrics
 
 ## Lint / Type Check Commands
 

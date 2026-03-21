@@ -81,10 +81,10 @@ tables:
         description: Lifetime transaction count.
         default_aggregation: sum
 
-      - name: TOTAL_TRANSACTION_VOLUME
-        expr: TOTAL_TRANSACTION_VOLUME
+      - name: TOTAL_SPENT
+        expr: TOTAL_SPENT
         data_type: NUMBER
-        description: Lifetime transaction dollar volume.
+        description: Lifetime transaction dollar volume (debits).
         default_aggregation: sum
 
       - name: LATEST_RISK_SCORE
@@ -196,14 +196,14 @@ tables:
         data_type: TEXT
         description: Transaction channel (ONLINE, POS, MOBILE, ATM, BRANCH).
 
-      - name: PERF_DATE
-        expr: PERF_DATE
+      - name: METRIC_DATE
+        expr: METRIC_DATE
         data_type: DATE
         description: The date of channel performance metrics.
 
     time_dimensions:
-      - name: PERF_DATE_TS
-        expr: PERF_DATE::TIMESTAMP_NTZ
+      - name: METRIC_DATE_TS
+        expr: METRIC_DATE::TIMESTAMP_NTZ
         data_type: TIMESTAMP_NTZ
         description: Performance date as timestamp.
 
@@ -226,10 +226,10 @@ tables:
         description: Average transaction amount for this channel.
         default_aggregation: avg
 
-      - name: UNIQUE_ACCOUNTS
-        expr: UNIQUE_ACCOUNTS
+      - name: UNIQUE_CUSTOMERS
+        expr: UNIQUE_CUSTOMERS
         data_type: NUMBER
-        description: Distinct accounts using this channel.
+        description: Distinct customers using this channel.
         default_aggregation: sum
 
   # ------------------------------------------------------------------
@@ -249,26 +249,21 @@ tables:
         data_type: NUMBER
         description: Customer identifier.
 
-      - name: FIRST_NAME
-        expr: FIRST_NAME
+      - name: CUSTOMER_NAME
+        expr: CUSTOMER_NAME
         data_type: TEXT
-        description: Customer first name.
-
-      - name: LAST_NAME
-        expr: LAST_NAME
-        data_type: TEXT
-        description: Customer last name.
+        description: Customer full name.
 
       - name: RISK_TIER
         expr: RISK_TIER
         data_type: TEXT
         description: >
           Risk classification based on risk score.
-          Values: CRITICAL (>80), HIGH (>60), MEDIUM (>40), LOW.
+          Values: CRITICAL (>80), HIGH (>60), MEDIUM (>40), LOW (>20), MINIMAL.
 
     measures:
-      - name: RISK_SCORE
-        expr: RISK_SCORE
+      - name: LATEST_RISK_SCORE
+        expr: LATEST_RISK_SCORE
         data_type: NUMBER
         description: Customer risk score (0-100).
         default_aggregation: avg
@@ -277,12 +272,6 @@ tables:
         expr: CREDIT_SCORE
         data_type: NUMBER
         description: Customer credit score (300-850).
-        default_aggregation: avg
-
-      - name: ANNUAL_INCOME
-        expr: ANNUAL_INCOME
-        data_type: NUMBER
-        description: Customer annual income.
         default_aggregation: avg
 
       - name: TOTAL_BALANCE
@@ -297,28 +286,32 @@ tables:
 # ------------------------------------------------------------------
 verified_queries:
 
-  - question: "How many customers are in each segment?"
+  - name: customers_by_segment
+    question: "How many customers are in each segment?"
     sql: >
       SELECT CUSTOMER_SEGMENT, COUNT(*) AS CUSTOMER_COUNT
       FROM FINSERV_DB.CONSUMPTION.DT_CUSTOMER_360
       GROUP BY CUSTOMER_SEGMENT
       ORDER BY CUSTOMER_COUNT DESC
 
-  - question: "What is the total transaction volume by channel?"
+  - name: volume_by_channel
+    question: "What is the total transaction volume by channel?"
     sql: >
       SELECT CHANNEL, SUM(TOTAL_VOLUME) AS TOTAL_VOLUME
       FROM FINSERV_DB.CONSUMPTION.DT_CHANNEL_PERFORMANCE
       GROUP BY CHANNEL
       ORDER BY TOTAL_VOLUME DESC
 
-  - question: "Show me the daily flagged transaction rate for the last 30 days"
+  - name: daily_flagged_rate
+    question: "Show me the daily flagged transaction rate for the last 30 days"
     sql: >
       SELECT METRIC_DATE, FLAGGED_RATE
       FROM FINSERV_DB.CONSUMPTION.DT_DAILY_FINANCIAL_METRICS
       WHERE METRIC_DATE >= DATEADD('day', -30, CURRENT_DATE())
       ORDER BY METRIC_DATE
 
-  - question: "Who are the top 10 customers by total balance?"
+  - name: top_customers_by_balance
+    question: "Who are the top 10 customers by total balance?"
     sql: >
       SELECT CUSTOMER_ID, FIRST_NAME, LAST_NAME, CUSTOMER_SEGMENT,
              TOTAL_BALANCE, TOTAL_TRANSACTIONS
@@ -326,7 +319,8 @@ verified_queries:
       ORDER BY TOTAL_BALANCE DESC
       LIMIT 10
 
-  - question: "How many customers are in the critical risk tier?"
+  - name: customers_by_risk_tier
+    question: "How many customers are in the critical risk tier?"
     sql: >
       SELECT RISK_TIER, COUNT(*) AS CUSTOMER_COUNT
       FROM FINSERV_DB.CONSUMPTION.DT_RISK_DASHBOARD

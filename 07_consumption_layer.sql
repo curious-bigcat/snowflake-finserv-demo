@@ -100,11 +100,11 @@ SELECT
     SUM(AMOUNT)                                            AS TOTAL_VOLUME,
     SUM(CASE WHEN TXN_TYPE = 'DEBIT' THEN AMOUNT ELSE 0 END) AS TOTAL_DEBITS,
     SUM(CASE WHEN TXN_TYPE = 'CREDIT' THEN AMOUNT ELSE 0 END) AS TOTAL_CREDITS,
-    AVG(AMOUNT)                                            AS AVG_TRANSACTION_AMOUNT,
+    AVG(AMOUNT)                                            AS AVG_TRANSACTION,
     MAX(AMOUNT)                                            AS MAX_TRANSACTION,
     SUM(CASE WHEN IS_FLAGGED THEN 1 ELSE 0 END)          AS FLAGGED_COUNT,
     ROUND(SUM(CASE WHEN IS_FLAGGED THEN 1 ELSE 0 END) * 100.0
-        / NULLIF(COUNT(*), 0), 2)                          AS FLAGGED_RATE_PCT
+        / NULLIF(COUNT(*), 0), 2)                          AS FLAGGED_RATE
 FROM CURATED.DT_TRANSACTION_ENRICHED
 GROUP BY TXN_DATE::DATE;
 
@@ -231,10 +231,10 @@ SELECT
     SUM(TOTAL_VOLUME)                                  AS MONTHLY_VOLUME,
     SUM(TOTAL_DEBITS)                                  AS MONTHLY_DEBITS,
     SUM(TOTAL_CREDITS)                                 AS MONTHLY_CREDITS,
-    AVG(AVG_TRANSACTION_AMOUNT)                        AS AVG_DAILY_TXN_AMOUNT,
+    AVG(AVG_TRANSACTION)                              AS AVG_DAILY_TXN_AMOUNT,
     MAX(MAX_TRANSACTION)                               AS PEAK_TRANSACTION,
     SUM(FLAGGED_COUNT)                                 AS MONTHLY_FLAGS,
-    AVG(FLAGGED_RATE_PCT)                              AS AVG_FLAG_RATE,
+    AVG(FLAGGED_RATE)                                  AS AVG_FLAG_RATE,
     COUNT(DISTINCT METRIC_DATE)                        AS TRADING_DAYS
 FROM CONSUMPTION.DT_DAILY_FINANCIAL_METRICS
 GROUP BY DATE_TRUNC('MONTH', METRIC_DATE);
