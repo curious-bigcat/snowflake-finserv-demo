@@ -117,7 +117,10 @@ with tab_overview:
 
     daily = load_daily_metrics()
     c360 = load_customer_360()
-    monthly = load_monthly_revenue()
+    try:
+        monthly = load_monthly_revenue()
+    except Exception:
+        monthly = pd.DataFrame()
 
     # KPI cards
     col1, col2, col3, col4 = st.columns(4)
@@ -162,8 +165,8 @@ with tab_overview:
             color="#d62728", strokeWidth=2
         ).encode(
             x=alt.X("METRIC_DATE:T", title="Date"),
-            y=alt.Y("FLAGGED_RATE_PCT:Q", title="Flag Rate (%)"),
-            tooltip=["METRIC_DATE:T", "FLAGGED_RATE_PCT:Q", "FLAGGED_COUNT:Q"]
+            y=alt.Y("FLAGGED_RATE:Q", title="Flag Rate (%)"),
+            tooltip=["METRIC_DATE:T", "FLAGGED_RATE:Q", "FLAGGED_COUNT:Q"]
         ).properties(height=200)
         st.altair_chart(flag_chart, use_container_width=True)
 
@@ -351,37 +354,28 @@ with tab_pipeline:
     # Dynamic table status
     st.subheader("Dynamic Table Refresh Status")
     try:
-        dt_status = run_query("""
-            SELECT
-                NAME,
-                SCHEMA_NAME,
-                TARGET_LAG,
-                REFRESH_MODE,
-                SCHEDULING_STATE
-            FROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLES())
-            WHERE DATABASE_NAME = 'FINSERV_DB'
-            ORDER BY SCHEMA_NAME, NAME
-        """)
+        dt_status = run_query("SHOW DYNAMIC TABLES IN DATABASE FINSERV_DB")
         if not dt_status.empty:
-            st.dataframe(dt_status, use_container_width=True, hide_index=True)
+            display_cols = [c for c in ["name", "schema_name", "target_lag", "refresh_mode",
+                                        "scheduling_state"] if c in dt_status.columns]
+            if display_cols:
+                st.dataframe(dt_status[display_cols], use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(dt_status, use_container_width=True, hide_index=True)
     except Exception as e:
         st.info(f"Dynamic table status unavailable: {e}")
 
     # Stream status
     st.subheader("Stream Status")
     try:
-        stream_info = run_query("""
-            SELECT
-                STREAM_NAME,
-                TABLE_NAME AS SOURCE_TABLE,
-                TYPE,
-                STALE,
-                STALE_AFTER
-            FROM FINSERV_DB.INFORMATION_SCHEMA.STREAMS
-            ORDER BY STREAM_NAME
-        """)
+        stream_info = run_query("SHOW STREAMS IN DATABASE FINSERV_DB")
         if not stream_info.empty:
-            st.dataframe(stream_info, use_container_width=True, hide_index=True)
+            display_cols = [c for c in ["name", "schema_name", "source_type", "table_name",
+                                        "stale", "stale_after"] if c in stream_info.columns]
+            if display_cols:
+                st.dataframe(stream_info[display_cols], use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(stream_info, use_container_width=True, hide_index=True)
     except Exception as e:
         st.info(f"Stream status unavailable: {e}")
 
@@ -390,9 +384,14 @@ with tab_pipeline:
     try:
         pipe_info = run_query("SHOW PIPES IN SCHEMA FINSERV_DB.RAW")
         if not pipe_info.empty:
-            st.dataframe(
-                pipe_info[["name", "definition", "notification_channel"]].head(10),
-                use_container_width=True, hide_index=True
-            )
+            display_cols = [c for c in ["name", "definition", "notification_channel"]
+                           if c in pipe_info.columns]
+            if display_cols:
+                st.dataframe(pipe_info[display_cols].head(10),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(pipe_info.head(10), use_container_width=True, hide_index=True)
+        else:
+            st.info("No pipes found in RAW schema")
     except Exception as e:
         st.info(f"Pipe status unavailable: {e}")
