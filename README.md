@@ -1,6 +1,6 @@
 # Snowflake Financial Services Demo (FINSERV)
 
-Full-stack Snowflake demo project implementing a **medallion architecture** data pipeline for a fictional financial services company. Covers 22+ Snowflake features across data engineering, AI/ML, security, data governance, and application development.
+Full-stack Snowflake demo project implementing a **medallion architecture** data pipeline for a fictional financial services company. Covers 25+ Snowflake features across data engineering, Snowpipe Streaming, Cortex AI functions, AI/ML, security, data governance, and application development.
 
 ---
 
@@ -16,7 +16,8 @@ Full-stack Snowflake demo project implementing a **medallion architecture** data
 │  │ 7 tables │    │ 7 streams│    │ 4 dynamic    │    │ 6 dynamic      │    │
 │  │ GENERATOR│    │ Snowpipe │    │   tables     │    │   tables       │    │
 │  │ data     │    │ S3 land. │    │              │    │ 2 SPs, 2 UDFs │    │
-│  │          │    │          │    │              │    │ 1 UDTF         │    │
+│  │ Streaming│    │ Streaming│    │              │    │ 1 UDTF         │    │
+│  │ ingest   │    │ CDC      │    │              │    │ Cortex AI Fns  │    │
 │  └──────────┘    └──────────┘    └──────────────┘    └────────────────┘    │
 │       │                │                                      │            │
 │       │           Task DAG                              MCP Server         │
@@ -64,19 +65,22 @@ git clone <repo-url> && cd snowpark
 # 4. Deploy Snowpark Python objects
 #    Execute 10_snowpark_python_sheet.sql
 
-# 5. Deploy Cortex AI services
+# 5. Explore Cortex AI functions
+#    Execute 11b_cortex_ai_functions.sql
+
+# 6. Deploy Cortex AI services
 #    Execute 13_cortex_search_agent.sql and 14_managed_mcp_server.sql
 
-# 6. Run the Streamlit dashboard
+# 7. Run the Streamlit dashboard
 streamlit run 15_streamlit_dashboard.py
 
-# 7. Validate the pipeline
+# 8. Validate the pipeline
 #    Execute 18_monitoring_and_validation.sql
 
-# 8. Test incremental data flow
+# 9. Test incremental data flow
 #    Execute 19_incremental_test_data.sql
 
-# 9. Explore performance concepts
+# 10. Explore performance concepts
 #    Execute 20_performance_exploration.sql
 ```
 
@@ -96,7 +100,7 @@ streamlit run 15_streamlit_dashboard.py
 | # | File | What It Does | Objects Created |
 |---|------|-------------|-----------------|
 | 03 | `03_csv_generator_and_s3_upload.py` | **Local Python** — generates CSV files and optionally uploads to S3 | CSV files (local), S3 objects (optional) |
-| 04 | `04_s3_stage_and_snowpipe.sql` | Creates file format, S3 landing tables, external stage, and Snowpipe (S3 parts require real bucket) | `CSV_FORMAT`, 3 landing tables (`CUSTOMERS_S3`, `TRANSACTIONS_S3`, `RISK_ASSESSMENTS_S3`), stage, pipes |
+| 04 | `04_s3_stage_and_snowpipe.sql` | Creates file format, S3 landing tables, external stage, Snowpipe, and **Snowpipe Streaming** demo (Python SP for synthetic micro-batch ingestion) | `CSV_FORMAT`, 3 landing tables, stage, pipes, `STREAMING_TRANSACTIONS` table, `STREAM_STREAMING_TRANSACTIONS` stream, `SP_STREAM_SYNTHETIC_TRANSACTIONS` SP |
 
 ### Phase 3: Medallion Pipeline (Files 05-08)
 
@@ -114,6 +118,7 @@ streamlit run 15_streamlit_dashboard.py
 | 09 | `09_snowpark_sql_sheet.sql` | 10 advanced SQL patterns: window functions, LATERAL FLATTEN, PIVOT/UNPIVOT, CTEs, ROLLUP, percentiles, fraud detection | Read-only queries — no persistent objects |
 | 10 | `10_snowpark_python_sheet.sql` | 6 Python-in-SQL objects: 2 stored procedures, 2 UDFs, 1 UDTF | `SP_RFM_SEGMENTATION`, `SP_PROCESS_TRANSACTIONS`, `ANOMALY_SCORE` UDF, `RISK_TIER` UDF, `PARSE_RISK_FACTORS` UDTF, `SP_PIPELINE_SUMMARY` |
 | 11 | `11_snowpark_python_notebook.ipynb` | **Local Jupyter notebook** — Snowpark DataFrame API exploration | No Snowflake objects (runs locally) |
+| 11b | `11b_cortex_ai_functions.sql` | 18-section showcase of **all Cortex AI functions** — classic (`COMPLETE`, `SENTIMENT`, `SUMMARIZE`, `EXTRACT_ANSWER`, `TRANSLATE`, `CLASSIFY_TEXT`, `EMBED_TEXT_768`) and modern (`AI_EXTRACT`, `AI_FILTER`, `AI_AGG`, `AI_REDACT`, `AI_SIMILARITY`, `AI_SUMMARIZE_AGG`, `ENTITY_SENTIMENT`, `AI_COMPLETE` with named params). Includes Python SP and UDF | `SP_AI_TICKET_ANALYZER` SP, `UDF_RISK_NARRATIVE` UDF |
 
 ### Phase 5: Cortex AI & MCP (Files 12-14)
 
@@ -177,77 +182,88 @@ A sequential curriculum for learning Snowflake features using this project. Foll
 | 7 | **Stages** | External Stages (S3) | 04 | STORAGE_INTEGRATION, URL, encryption, DIRECTORY |
 | 8 | **COPY INTO** | Bulk Loading | 04 | FROM stage, FILE_FORMAT, ON_ERROR, MATCH_BY_COLUMN_NAME |
 | 9 | **Snowpipe** | Continuous Loading | 04 | AUTO_INGEST, SQS notifications, SYSTEM$PIPE_STATUS() |
+| 10 | **Snowpipe Streaming** | Low-Latency Ingestion | 04 | Micro-batch INSERT via Python SP, configurable batch size/delay, CDC stream on landing table |
 
 ### Level 3: Change Data Capture
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 10 | **Streams** | CDC Tracking | 05 | SHOW_INITIAL_ROWS, METADATA$ACTION, METADATA$ISUPDATE, SYSTEM$STREAM_HAS_DATA() |
-| 11 | **Stream Types** | Standard vs Append-only | 05 | Standard (full CDC), Append-only (inserts only) |
+| 11 | **Streams** | CDC Tracking | 05 | SHOW_INITIAL_ROWS, METADATA$ACTION, METADATA$ISUPDATE, SYSTEM$STREAM_HAS_DATA() |
+| 12 | **Stream Types** | Standard vs Append-only | 05 | Standard (full CDC), Append-only (inserts only) |
 
 ### Level 4: Transformations
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 12 | **Dynamic Tables** | Declarative Pipelines | 06-07 | TARGET_LAG (1 min, 5 min, DOWNSTREAM), REFRESH_MODE (FULL vs INCREMENTAL), INITIALIZE |
-| 13 | **Materialized Views** | Auto-Maintained Views | 06 | MV on VARIANT data, automatic refresh, query rewrite |
-| 14 | **LATERAL FLATTEN** | JSON Array Expansion | 06, 09 | FLATTEN(INPUT =>, OUTER => TRUE), VALUE, INDEX |
-| 15 | **QUALIFY** | Window Filter | 06 | ROW_NUMBER() OVER (...) with QUALIFY for deduplication |
+| 13 | **Dynamic Tables** | Declarative Pipelines | 06-07 | TARGET_LAG (1 min, 5 min, DOWNSTREAM), REFRESH_MODE (FULL vs INCREMENTAL), INITIALIZE |
+| 14 | **Materialized Views** | Auto-Maintained Views | 06 | MV on VARIANT data, automatic refresh, query rewrite |
+| 15 | **LATERAL FLATTEN** | JSON Array Expansion | 06, 09 | FLATTEN(INPUT =>, OUTER => TRUE), VALUE, INDEX |
+| 16 | **QUALIFY** | Window Filter | 06 | ROW_NUMBER() OVER (...) with QUALIFY for deduplication |
 
 ### Level 5: Orchestration
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 16 | **Tasks** | Scheduled Execution | 08 | SCHEDULE (CRON/interval), WAREHOUSE, AFTER (predecessors) |
-| 17 | **Task DAGs** | Dependency Graphs | 08 | Root→children→grandchild, WHEN conditions, EXECUTE TASK |
-| 18 | **Stream + Task** | Event-Driven Processing | 08 | `WHEN SYSTEM$STREAM_HAS_DATA()`, MERGE INTO with stream |
+| 17 | **Tasks** | Scheduled Execution | 08 | SCHEDULE (CRON/interval), WAREHOUSE, AFTER (predecessors) |
+| 18 | **Task DAGs** | Dependency Graphs | 08 | Root→children→grandchild, WHEN conditions, EXECUTE TASK |
+| 19 | **Stream + Task** | Event-Driven Processing | 08 | `WHEN SYSTEM$STREAM_HAS_DATA()`, MERGE INTO with stream |
 
 ### Level 6: Advanced SQL
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 19 | **Window Functions** | Analytics | 09 | SUM/COUNT/ROW_NUMBER OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN) |
-| 20 | **PIVOT / UNPIVOT** | Reshaping Data | 09 | PIVOT (AGG FOR col IN (...)), UNPIVOT (VALUE FOR METRIC IN (...)) |
-| 21 | **GROUP BY ROLLUP** | Subtotals | 09 | ROLLUP(), CUBE(), GROUPING SETS |
-| 22 | **PERCENTILE_CONT** | Statistical Functions | 09 | WITHIN GROUP (ORDER BY ...), MEDIAN(), STDDEV() |
+| 20 | **Window Functions** | Analytics | 09 | SUM/COUNT/ROW_NUMBER OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN) |
+| 21 | **PIVOT / UNPIVOT** | Reshaping Data | 09 | PIVOT (AGG FOR col IN (...)), UNPIVOT (VALUE FOR METRIC IN (...)) |
+| 22 | **GROUP BY ROLLUP** | Subtotals | 09 | ROLLUP(), CUBE(), GROUPING SETS |
+| 23 | **PERCENTILE_CONT** | Statistical Functions | 09 | WITHIN GROUP (ORDER BY ...), MEDIAN(), STDDEV() |
 
 ### Level 7: Snowpark Python
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 23 | **Stored Procedures** | Python SPs | 10 | LANGUAGE PYTHON, PACKAGES, HANDLER, session.table(), write.save_as_table() |
-| 24 | **Scalar UDFs** | Python UDFs | 10 | RETURNS FLOAT/VARCHAR, single-row transform, pure Python |
-| 25 | **Table UDFs (UDTFs)** | Python UDTFs | 10 | RETURNS TABLE(...), class with process() method, yield rows |
-| 26 | **DataFrame API** | Snowpark DataFrames | 11 | col(), filter(), group_by(), agg(), join(), with_column() |
+| 24 | **Stored Procedures** | Python SPs | 10 | LANGUAGE PYTHON, PACKAGES, HANDLER, session.table(), write.save_as_table() |
+| 25 | **Scalar UDFs** | Python UDFs | 10 | RETURNS FLOAT/VARCHAR, single-row transform, pure Python |
+| 26 | **Table UDFs (UDTFs)** | Python UDTFs | 10 | RETURNS TABLE(...), class with process() method, yield rows |
+| 27 | **DataFrame API** | Snowpark DataFrames | 11 | col(), filter(), group_by(), agg(), join(), with_column() |
 
 ### Level 8: Cortex AI
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 27 | **Semantic Models** | Cortex Analyst | 12 | YAML schema: tables, dimensions, measures, time_dimensions, filters |
-| 28 | **Cortex Search** | Vector Search | 13 | ON column, ATTRIBUTES, TARGET_LAG, embedding model |
-| 29 | **Cortex Agent** | Multi-Tool Agent | 13 | Tool routing: analyst_text_to_sql, cortex_search |
+| 28 | **LLM Completions** | CORTEX.COMPLETE | 11b | Risk narratives, structured JSON output, temperature, response_format |
+| 29 | **Sentiment Analysis** | CORTEX.SENTIMENT / ENTITY_SENTIMENT | 11b | Per-row scoring (-1 to 1), per-entity sentiment extraction |
+| 30 | **Summarization** | CORTEX.SUMMARIZE / AI_SUMMARIZE_AGG | 11b | Single-doc abstracts, cross-row aggregated summaries |
+| 31 | **Question Answering** | CORTEX.EXTRACT_ANSWER | 11b | Q&A over document text, multi-question patterns |
+| 32 | **Translation** | CORTEX.TRANSLATE | 11b | Multi-language output (es, fr, de) |
+| 33 | **Classification** | CORTEX.CLASSIFY_TEXT | 11b | Zero-shot classification with custom label arrays |
+| 34 | **Embeddings** | CORTEX.EMBED_TEXT_768 | 11b | Vector embeddings, VECTOR_COSINE_SIMILARITY for semantic matching |
+| 35 | **AI Extract & Filter** | AI_EXTRACT / AI_FILTER | 11b | Structured entity extraction, natural language boolean filtering, PROMPT() |
+| 36 | **AI Aggregate & Redact** | AI_AGG / AI_REDACT | 11b | Cross-row insights, PII redaction (full/selective/chained) |
+| 37 | **AI Similarity & Complete** | AI_SIMILARITY / AI_COMPLETE | 11b | Semantic scoring, named params, model_parameters, show_details |
+| 38 | **Semantic Models** | Cortex Analyst | 12 | YAML schema: tables, dimensions, measures, time_dimensions, filters |
+| 39 | **Cortex Search** | Vector Search | 13 | ON column, ATTRIBUTES, TARGET_LAG, embedding model |
+| 40 | **Cortex Agent** | Multi-Tool Agent | 13 | Tool routing: analyst_text_to_sql, cortex_search |
 
 ### Level 9: Integration & Apps
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 30 | **MCP Server** | Managed MCP | 14 | CREATE MCP SERVER, tool types: CORTEX_SEARCH, SYSTEM_EXECUTE_SQL, GENERIC |
-| 31 | **Streamlit** | Data Apps | 15 | st.connection("snowflake"), tabs, Altair charts, metrics |
-| 32 | **ML Pipelines** | Model Training | 16-17 | Feature engineering from DTs, classification, regression |
+| 41 | **MCP Server** | Managed MCP | 14 | CREATE MCP SERVER, tool types: CORTEX_SEARCH, SYSTEM_EXECUTE_SQL, GENERIC |
+| 42 | **Streamlit** | Data Apps | 15 | st.connection("snowflake"), tabs, Altair charts, metrics |
+| 43 | **ML Pipelines** | Model Training | 16-17 | Feature engineering from DTs, classification, regression |
 
 ### Level 10: Operations & Performance
 
 | # | Topic | Feature | File | Key Concepts |
 |---|-------|---------|------|-------------|
-| 33 | **Pipeline Monitoring** | Observability | 18 | INFORMATION_SCHEMA views, SYSTEM$ functions, data quality checks |
-| 34 | **Incremental Testing** | CDC Validation | 19 | Insert→stream→task→DT refresh→verify counts |
-| 35 | **EXPLAIN Plans** | Query Profiling | 20 | EXPLAIN USING TABULAR/JSON, execution plan analysis |
-| 36 | **Clustering** | Storage Optimization | 20 | CLUSTER BY, SYSTEM$CLUSTERING_INFORMATION, automatic clustering |
-| 37 | **Search Optimization** | Point Lookup Speed | 20 | ADD SEARCH OPTIMIZATION ON EQUALITY/SUBSTRING |
-| 38 | **Result Caching** | Query Cache | 20 | USE_CACHED_RESULT, PERCENTAGE_SCANNED_FROM_CACHE |
-| 39 | **Resource Monitors** | Cost Guardrails | 20 | CREDIT_QUOTA, TRIGGERS, NOTIFY/SUSPEND/SUSPEND_IMMEDIATE |
-| 40 | **Query Acceleration** | Elastic Compute | 20 | SYSTEM$ESTIMATE_QUERY_ACCELERATION, QUERY_ACCELERATION_ELIGIBLE |
+| 44 | **Pipeline Monitoring** | Observability | 18 | INFORMATION_SCHEMA views, SYSTEM$ functions, data quality checks |
+| 45 | **Incremental Testing** | CDC Validation | 19 | Insert→stream→task→DT refresh→verify counts |
+| 46 | **EXPLAIN Plans** | Query Profiling | 20 | EXPLAIN USING TABULAR/JSON, execution plan analysis |
+| 47 | **Clustering** | Storage Optimization | 20 | CLUSTER BY, SYSTEM$CLUSTERING_INFORMATION, automatic clustering |
+| 48 | **Search Optimization** | Point Lookup Speed | 20 | ADD SEARCH OPTIMIZATION ON EQUALITY/SUBSTRING |
+| 49 | **Result Caching** | Query Cache | 20 | USE_CACHED_RESULT, PERCENTAGE_SCANNED_FROM_CACHE |
+| 50 | **Resource Monitors** | Cost Guardrails | 20 | CREDIT_QUOTA, TRIGGERS, NOTIFY/SUSPEND/SUSPEND_IMMEDIATE |
+| 51 | **Query Acceleration** | Elastic Compute | 20 | SYSTEM$ESTIMATE_QUERY_ACCELERATION, QUERY_ACCELERATION_ELIGIBLE |
 
 ---
 
@@ -264,6 +280,7 @@ A sequential curriculum for learning Snowflake features using this project. Foll
 | MARKET_DATA | 5,000 | DATA_ID, TICKER, TRADE_DATE, MARKET_DATA (VARIANT) |
 | SUPPORT_TICKETS | 1,000 | TICKET_ID, CUSTOMER_ID, SUBJECT, BODY (TEXT), PRIORITY, RESOLUTION_STATUS |
 | COMPLIANCE_DOCUMENTS | 200 | DOC_ID, DOC_TYPE, DOC_CONTENT (TEXT), METADATA (VARIANT) |
+| STREAMING_TRANSACTIONS | variable | TXN_ID (autoincrement), ACCOUNT_ID, TXN_DATE, AMOUNT, CATEGORY, CHANNEL, IS_FLAGGED, _BATCH_ID, _STREAMED_AT |
 
 ### Dynamic Tables
 
@@ -287,7 +304,7 @@ A sequential curriculum for learning Snowflake features using this project. Foll
 
 ### Streams (RAW)
 
-TRANSACTIONS_STREAM, SUPPORT_TICKETS_STREAM
+TRANSACTIONS_STREAM, SUPPORT_TICKETS_STREAM, STREAM_STREAMING_TRANSACTIONS (CDC on Snowpipe Streaming landing table)
 
 ### Event Tables (RAW)
 
@@ -324,6 +341,14 @@ TRANSACTIONS_STREAM, SUPPORT_TICKETS_STREAM
 | ANOMALY_SCORE | UDF | Z-score anomaly detection |
 | RISK_TIER | UDF | Composite risk tier |
 | PARSE_RISK_FACTORS | UDTF | Parse VARIANT risk data |
+| SP_AI_TICKET_ANALYZER | Stored Procedure | Batch Cortex AI sentiment + classification |
+| UDF_RISK_NARRATIVE | UDF | Risk narrative via Cortex REST API |
+
+### Snowpark Python Objects (BASE)
+
+| Object | Type | Description |
+|--------|------|-------------|
+| SP_STREAM_SYNTHETIC_TRANSACTIONS | Stored Procedure | Snowpipe Streaming emulation — generates synthetic micro-batches |
 
 ---
 
