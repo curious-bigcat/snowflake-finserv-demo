@@ -263,7 +263,218 @@ FORCE = TRUE ON_ERROR = 'CONTINUE';
 
 
 -- ============================================================
--- 8. VERIFY
+-- 8. SNOWPIPE STREAMING DEMO — Synthetic Data via Python SP
+-- ============================================================
+-- Demonstrates Snowpipe Streaming concepts using a Python stored
+-- procedure that generates synthetic financial transactions and
+-- inserts them in micro-batches, simulating real-time streaming
+-- ingestion into the medallion pipeline.
+--
+-- Snowpipe Streaming enables low-latency data loading by writing
+-- rows directly into Snowflake tables without staging files. Here
+-- we emulate that pattern with a Python SP that produces realistic
+-- financial transaction data in configurable micro-batches.
+--
+-- Usage:
+--   CALL BASE.SP_STREAM_SYNTHETIC_TRANSACTIONS(5, 100, 1);
+--   → 5 batches × 100 rows = 500 rows, 1-second delay between batches
+-- ============================================================
+
+USE SCHEMA BASE;
+
+-- 8a. Target table for streamed data
+CREATE TABLE IF NOT EXISTS STREAMING_TRANSACTIONS (
+    TXN_ID          NUMBER AUTOINCREMENT START 1 INCREMENT 1,
+    ACCOUNT_ID      NUMBER,
+    TXN_DATE        TIMESTAMP_NTZ,
+    TXN_TYPE        VARCHAR(15),
+    AMOUNT          NUMBER(12,2),
+    MERCHANT_NAME   VARCHAR(100),
+    CATEGORY        VARCHAR(30),
+    CHANNEL         VARCHAR(15),
+    IS_FLAGGED      BOOLEAN DEFAULT FALSE,
+    _BATCH_ID       NUMBER,
+    _STREAMED_AT    TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CONSTRAINT PK_STREAMING_TXN PRIMARY KEY (TXN_ID)
+);
+
+-- 8b. Stream on the streaming table (feeds into medallion pipeline)
+CREATE STREAM IF NOT EXISTS RAW.STREAM_STREAMING_TRANSACTIONS
+    ON TABLE BASE.STREAMING_TRANSACTIONS
+    SHOW_INITIAL_ROWS = TRUE
+    COMMENT = 'CDC stream on Snowpipe Streaming target table';
+
+-- 8c. Python SP — generates synthetic transactions in micro-batches
+CREATE OR REPLACE PROCEDURE SP_STREAM_SYNTHETIC_TRANSACTIONS(
+    NUM_BATCHES     INT,
+    ROWS_PER_BATCH  INT,
+    DELAY_SECONDS   INT
+)
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python')
+HANDLER = 'run'
+EXECUTE AS CALLER
+AS
+$$
+import time
+import random
+from datetime import datetime, timedelta
+
+def run(session, num_batches: int, rows_per_batch: int, delay_seconds: int) -> str:
+    """
+    Generates synthetic financial transactions in micro-batches,
+    emulating the Snowpipe Streaming pattern of low-latency row ingestion.
+
+    Args:
+        num_batches:    Number of micro-batches to produce
+        rows_per_batch: Rows per micro-batch
+        delay_seconds:  Pause between batches (simulates streaming cadence)
+    """
+
+    TXN_TYPES = ['PURCHASE', 'DEPOSIT', 'WITHDRAWAL', 'TRANSFER',
+                 'PAYMENT', 'REFUND', 'FEE', 'INTEREST']
+    TXN_WEIGHTS = [35, 15, 15, 10, 10, 5, 5, 5]
+
+    MERCHANTS = [
+        'Amazon', 'Walmart', 'Target', 'Costco', 'Whole Foods',
+        'Starbucks', 'McDonalds', 'Uber', 'Lyft', 'Netflix',
+        'Spotify', 'Apple Store', 'Google Play', 'Shell Gas',
+        'BP Fuel', 'Chevron', 'Home Depot', 'Lowes', 'Best Buy',
+        'Nike', 'Adidas', 'Zara', 'H&M', 'Trader Joes',
+        'CVS Pharmacy', 'Walgreens', 'Delta Airlines', 'United Airlines',
+        'Hilton Hotels', 'Marriott', 'Airbnb', 'DoorDash', 'Grubhub'
+    ]
+
+    CATEGORIES = ['RETAIL', 'GROCERIES', 'DINING', 'TRANSPORTATION',
+                  'ENTERTAINMENT', 'UTILITIES', 'HEALTHCARE', 'TRAVEL',
+                  'SUBSCRIPTION', 'FUEL', 'HOME_IMPROVEMENT', 'CLOTHING',
+                  'TRANSFER', 'FEE']
+
+    CHANNELS = ['ONLINE', 'IN_STORE', 'MOBILE', 'ATM', 'WIRE', 'ACH']
+    CHANNEL_WEIGHTS = [30, 25, 25, 10, 5, 5]
+
+    CATEGORY_MERCHANTS = {
+        'RETAIL':           ['Amazon', 'Walmart', 'Target', 'Costco', 'Best Buy', 'Nike', 'Adidas'],
+        'GROCERIES':        ['Whole Foods', 'Trader Joes', 'Costco', 'Walmart', 'Target'],
+        'DINING':           ['Starbucks', 'McDonalds', 'DoorDash', 'Grubhub'],
+        'TRANSPORTATION':   ['Uber', 'Lyft', 'Delta Airlines', 'United Airlines'],
+        'ENTERTAINMENT':    ['Netflix', 'Spotify', 'Apple Store', 'Google Play'],
+        'FUEL':             ['Shell Gas', 'BP Fuel', 'Chevron'],
+        'HEALTHCARE':       ['CVS Pharmacy', 'Walgreens'],
+        'TRAVEL':           ['Delta Airlines', 'United Airlines', 'Hilton Hotels', 'Marriott', 'Airbnb'],
+        'HOME_IMPROVEMENT': ['Home Depot', 'Lowes'],
+        'CLOTHING':         ['Nike', 'Adidas', 'Zara', 'H&M'],
+        'SUBSCRIPTION':     ['Netflix', 'Spotify', 'Apple Store'],
+    }
+
+    AMOUNT_RANGES = {
+        'PURCHASE':   (1.50, 2500.00),
+        'DEPOSIT':    (100.00, 15000.00),
+        'WITHDRAWAL': (20.00, 5000.00),
+        'TRANSFER':   (50.00, 25000.00),
+        'PAYMENT':    (25.00, 5000.00),
+        'REFUND':     (5.00, 500.00),
+        'FEE':        (1.00, 75.00),
+        'INTEREST':   (0.50, 200.00),
+    }
+
+    total_rows = 0
+    total_flagged = 0
+
+    for batch_num in range(1, num_batches + 1):
+        rows = []
+        for _ in range(rows_per_batch):
+            account_id = random.randint(1, 3000)
+            txn_type = random.choices(TXN_TYPES, weights=TXN_WEIGHTS)[0]
+            category = random.choice(CATEGORIES)
+
+            # Pick merchant correlated with category when possible
+            merchant = random.choice(
+                CATEGORY_MERCHANTS.get(category, MERCHANTS)
+            )
+
+            # Amount varies by transaction type
+            lo, hi = AMOUNT_RANGES.get(txn_type, (10.00, 1000.00))
+            amount = round(random.uniform(lo, hi), 2)
+
+            channel = random.choices(CHANNELS, weights=CHANNEL_WEIGHTS)[0]
+
+            # ~3% flagged rate; 15% for amounts over 5000
+            is_flagged = random.random() < (0.03 if amount < 5000 else 0.15)
+            if is_flagged:
+                total_flagged += 1
+
+            # Timestamp within the last 5 minutes (simulates real-time)
+            txn_date = datetime.now() - timedelta(
+                seconds=random.randint(0, 300)
+            )
+
+            rows.append([
+                account_id,
+                txn_date.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                txn_type,
+                amount,
+                merchant,
+                category,
+                channel,
+                is_flagged,
+                batch_num,
+            ])
+
+        # Insert micro-batch via SQL (bypasses column ordering issues)
+        placeholders = ', '.join(['(?, ?, ?, ?, ?, ?, ?, ?, ?)'] * len(rows))
+        flat_values = [v for row in rows for v in row]
+
+        session.sql(
+            f"""INSERT INTO FINSERV_DB.BASE.STREAMING_TRANSACTIONS
+                (ACCOUNT_ID, TXN_DATE, TXN_TYPE, AMOUNT,
+                 MERCHANT_NAME, CATEGORY, CHANNEL, IS_FLAGGED, _BATCH_ID)
+            SELECT
+                COLUMN1::NUMBER,
+                COLUMN2::TIMESTAMP_NTZ,
+                COLUMN3::VARCHAR,
+                COLUMN4::NUMBER(12,2),
+                COLUMN5::VARCHAR,
+                COLUMN6::VARCHAR,
+                COLUMN7::VARCHAR,
+                COLUMN8::BOOLEAN,
+                COLUMN9::NUMBER
+            FROM VALUES {placeholders}""",
+            flat_values
+        ).collect()
+
+        total_rows += rows_per_batch
+
+        # Delay between batches to simulate streaming cadence
+        if batch_num < num_batches and delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+    return (
+        f"Streaming complete: {num_batches} batches, "
+        f"{total_rows} total rows inserted, "
+        f"{total_flagged} flagged transactions"
+    )
+$$;
+
+-- 8d. Run the streaming demo (5 batches × 200 rows = 1,000 rows, 1s delay)
+-- CALL BASE.SP_STREAM_SYNTHETIC_TRANSACTIONS(5, 200, 1);
+
+-- 8e. Verify streamed data
+-- SELECT _BATCH_ID, COUNT(*) AS ROW_COUNT, SUM(AMOUNT) AS BATCH_TOTAL,
+--        SUM(CASE WHEN IS_FLAGGED THEN 1 ELSE 0 END) AS FLAGGED_COUNT,
+--        MIN(_STREAMED_AT) AS FIRST_ARRIVAL, MAX(_STREAMED_AT) AS LAST_ARRIVAL
+-- FROM BASE.STREAMING_TRANSACTIONS
+-- GROUP BY _BATCH_ID
+-- ORDER BY _BATCH_ID;
+
+-- Check stream has data for downstream consumption
+-- SELECT SYSTEM$STREAM_HAS_DATA('RAW.STREAM_STREAMING_TRANSACTIONS') AS HAS_DATA;
+
+
+-- ============================================================
+-- 9. VERIFY
 -- ============================================================
 
 -- Snowpipe status
